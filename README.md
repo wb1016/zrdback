@@ -47,9 +47,9 @@ xychart-beta
 
 | | ZRDBack | FastBack |
 |---|---|---|
-| incremental backup time | 5.5-10.7 s, flat in world size | <=5-10 s per round |
-| store size @ 10k chunks | 39.7 MB | 126.9 MB (3.2x smaller) |
-| store size @ 200k chunks | 768 MB | 6.73 GB (8.8x smaller) |
+| incremental backup time | 5.5-10.7 s, flat in world size | 2-10 s per round |
+| store size @ 10k chunks | 39.7 MB (3.2x smaller) | 126.9 MB  |
+| store size @ 200k chunks | 768 MB (8.8x smaller) | 6.73 GB  |
 | growth per ~10k-chunk backup | ~36-40 MB | ~330-470 MB |
 
 The size gap widens as history accumulates: git re-blobs every modified region file whole
