@@ -3,8 +3,11 @@
   "id": "zrdback",
   "version": "${mod_version}",
   "name": "ZRDBack",
-  "description": "Super efficient, blazing fast backup mod powered by zstd and zvcr.",
+  "description": "Super efficient backup mod powered by zstd and zvcr.",
   "license": "GPL-3.0-or-later",
+  "contact": {
+    "sources": "https://github.com/wb1016/zrdback"
+  },
   "environment": "*",
   "authors": [
     "CobaltDev"
@@ -12,8 +15,9 @@
   "contributors": [
     "crayne"
   ],
+  "icon": "assets/zrdback/icon.png",
   "entrypoints": {
-    "server": [
+    "main": [
       "space.cobaltworks.zrdback.ZrdBack"
     ]
   },

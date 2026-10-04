@@ -26,7 +26,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import net.fabricmc.api.DedicatedServerModInitializer;
+import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.minecraft.server.MinecraftServer;
@@ -37,13 +37,14 @@ import space.cobaltworks.zrdback.backup.BackupService;
 import space.cobaltworks.zrdback.command.BackupCommands;
 
 /**
- * Server entrypoint for the ZVCR backup mod.
+ * Main entrypoint for the ZVCR backup mod. Registered events only fire once a
+ * server (dedicated or integrated/single-player) actually starts.
  *
  * <p>The mod is a read-only observer of the live world save: it never writes
  * to the world folder. Backups are stored in the ZVCR-3D format via the
  * {@code zvcr-java} library, byte-compatible with the C++ reference tools.
  */
-public final class ZrdBack implements DedicatedServerModInitializer {
+public final class ZrdBack implements ModInitializer {
 
     public static final String MOD_ID = "zrdback";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
@@ -52,7 +53,7 @@ public final class ZrdBack implements DedicatedServerModInitializer {
     private static volatile ScheduledExecutorService scheduler;
 
     @Override
-    public void onInitializeServer() {
+    public void onInitialize() {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
                 dispatcher.register(BackupCommands.build(SERVICE::get)));
         ServerLifecycleEvents.SERVER_STARTED.register(ZrdBack::onServerStarted);

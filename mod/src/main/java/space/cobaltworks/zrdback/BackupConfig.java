@@ -37,6 +37,9 @@ import net.fabricmc.loader.api.FabricLoader;
  *       folder itself is never written to).</li>
  *   <li>{@code interval-minutes} — hourly cadence by default.</li>
  *   <li>{@code checkpoint-interval} — full snapshot every N deltas per chain.</li>
+ *   <li>{@code threads} — worker threads for backup/prune; 0 = auto (half the
+ *       cores, min 1). Workers run at minimum priority so ticks are served
+ *       first. Region files are independent, so they process in parallel.</li>
  * </ul>
  */
 public final class BackupConfig {
@@ -47,13 +50,15 @@ public final class BackupConfig {
     private final int intervalMinutes;
     private final int checkpointInterval;
     private final int retentionDays;
+    private final int threads;
 
     private BackupConfig(Path outputDirectory, int intervalMinutes, int checkpointInterval,
-                         int retentionDays) {
+                         int retentionDays, int threads) {
         this.outputDirectory = outputDirectory;
         this.intervalMinutes = intervalMinutes;
         this.checkpointInterval = checkpointInterval;
         this.retentionDays = retentionDays;
+        this.threads = threads;
     }
 
     public static BackupConfig load(Path worldRoot) {
@@ -80,7 +85,11 @@ public final class BackupConfig {
         // 0 disables automatic pruning (manual /backup prune <days> still works).
         int retention = Math.max(0,
                 Integer.parseInt(props.getProperty("retention-days", "0").trim()));
-        return new BackupConfig(outputDirectory, interval, checkpoint, retention);
+        int threads = Integer.parseInt(props.getProperty("threads", "0").trim());
+        if (threads < 0) {
+            throw new IllegalStateException("threads must be >= 0: " + threads);
+        }
+        return new BackupConfig(outputDirectory, interval, checkpoint, retention, threads);
     }
 
     private static int parsePositive(Properties props, String key, int fallback) {
@@ -106,5 +115,10 @@ public final class BackupConfig {
     /** 0 = keep history forever (manual prune only). */
     public int retentionDays() {
         return retentionDays;
+    }
+
+    /** Worker threads for backup/prune; 0 = auto (all cores). */
+    public int threads() {
+        return threads;
     }
 }

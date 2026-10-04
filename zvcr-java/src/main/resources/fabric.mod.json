@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "zvcr-java",
+  "version": "${mod_version}",
+  "name": "ZVCR Java",
+  "description": "Java implementation of the ZVCR-3D backup format, byte-compatible with the C++ reference implementation.",
+  "license": "GPL-3.0-or-later",
+  "environment": "*"
+}

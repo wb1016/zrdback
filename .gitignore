@@ -5,3 +5,11 @@ out/
 *.iml
 .idea/
 .vscode/
+bin/
+
+*/.gradle/
+*/build/
+*/run/
+*/out/
+*/*.iml
+*/bin/

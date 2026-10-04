@@ -27,6 +27,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import net.minecraft.nbt.CompoundTag;
@@ -197,11 +202,12 @@ public final class BackupService {
         long start = System.currentTimeMillis();
         Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
         Files.createDirectories(config.outputDirectory());
+        // One timestamp for the whole run: the change gate (chunk header newer
+        // than chain head) must be consistent across all region files.
+        long backupTimestamp = Instant.now().getEpochSecond();
 
-        int regions = 0;
-        int changed = 0;
-        int inserted = 0;
-
+        record RegionTask(DimensionMapping mapping, Path mca, int rx, int rz) {}
+        List<RegionTask> tasks = new ArrayList<>();
         for (DimensionMapping mapping : DimensionMapping.values()) {
             // 26.x layout: world/dimensions/<ns>/<path>/region — resolved via the
             // vanilla API rather than hardcoded directory names.
@@ -217,24 +223,71 @@ public final class BackupService {
                     if (coords == null) {
                         continue;
                     }
-                    regions++;
-                    int[] counts = backupRegionFile(mapping, mca, worldRoot,
-                            (int) coords[0], (int) coords[1]);
-                    changed += counts[0];
-                    inserted += counts[1];
+                    tasks.add(new RegionTask(mapping, mca, (int) coords[0], (int) coords[1]));
                 }
             }
         }
 
-        long backupTimestamp = Instant.now().getEpochSecond();
+        // Region files are independent (own .mca, own .zvcr3d): scan, chunk
+        // inflate, extraction, packing, serialization and fsync all parallelize.
+        long changed = 0;
+        long inserted = 0;
+        try (ExecutorService pool = newWorkerPool()) {
+            List<Future<int[]>> futures = new ArrayList<>(tasks.size());
+            for (RegionTask task : tasks) {
+                futures.add(pool.submit(() -> backupRegionFile(task.mapping(), task.mca(),
+                        worldRoot, task.rx(), task.rz(), backupTimestamp)));
+            }
+            for (Future<int[]> future : futures) {
+                int[] counts = await(future, "Backup");
+                changed += counts[0];
+                inserted += counts[1];
+            }
+        }
+
         int blobsStored = backupAuxiliaryFiles(worldRoot, backupTimestamp);
 
         int pruned = 0;
         if (config.retentionDays() > 0) {
             pruned = prune(config.retentionDays()).chunksChanged();
         }
-        return new Result(regions, changed, inserted, blobsStored, pruned,
+        return new Result(tasks.size(), (int) changed, (int) inserted, blobsStored, pruned,
                 System.currentTimeMillis() - start);
+    }
+
+    private ExecutorService newWorkerPool() {
+        // Auto = half the cores: on SMT CPUs that matches the physical core
+        // count (the sweet spot for zlib/zstd work) and leaves logical siblings
+        // for the server/render/GC threads.
+        int threads = config.threads() > 0
+                ? config.threads()
+                : Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+        AtomicInteger seq = new AtomicInteger();
+        return Executors.newFixedThreadPool(threads, r -> {
+            Thread thread = new Thread(r, "zrdback-worker-" + seq.incrementAndGet());
+            thread.setDaemon(true);
+            // MIN_PRIORITY maps to nice 19 on Linux: workers only soak up idle
+            // CPU instead of competing tick-for-tick with the server thread.
+            // No throughput loss while cores are idle; ticks win when busy.
+            thread.setPriority(Thread.MIN_PRIORITY);
+            return thread;
+        });
+    }
+
+    /** Waits for a task result, unwrapping failures to the thrown cause. */
+    private static <T> T await(Future<T> future, String what) throws IOException {
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException(what + " interrupted", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof IOException io) throw io;
+            if (cause instanceof RuntimeException rt) throw rt;
+            if (cause instanceof Error err) throw err;
+            throw new IOException(cause);
+        }
     }
 
     /**
@@ -289,23 +342,33 @@ public final class BackupService {
     public Result prune(int retentionDays) throws IOException {
         long start = System.currentTimeMillis();
         long cutoff = Instant.now().getEpochSecond() - retentionDays * 86400L;
-        int regions = 0;
-        int pruned = 0;
 
+        List<Path> files = new ArrayList<>();
         for (Dimension dimension : Dimension.values()) {
             Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
             if (!Files.isDirectory(dimDir)) {
                 continue;
             }
-            try (Stream<Path> files = Files.walk(dimDir)) {
-                for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".zvcr3d")).toList()) {
-                    regions++;
-                    pruned += pruneFile(file, cutoff);
-                }
+            try (Stream<Path> stream = Files.walk(dimDir)) {
+                files.addAll(stream
+                        .filter(f -> f.getFileName().toString().endsWith(".zvcr3d"))
+                        .toList());
+            }
+        }
+
+        long pruned = 0;
+        try (ExecutorService pool = newWorkerPool()) {
+            List<Future<Integer>> futures = new ArrayList<>(files.size());
+            for (Path file : files) {
+                futures.add(pool.submit(() -> pruneFile(file, cutoff)));
+            }
+            for (Future<Integer> future : futures) {
+                pruned += await(future, "Prune");
             }
         }
         pruned += FileBlobStore.open(config.outputDirectory()).prune(cutoff);
-        return new Result(regions, pruned, 0, 0, 0, System.currentTimeMillis() - start);
+        return new Result(files.size(), (int) pruned, 0, 0, 0,
+                System.currentTimeMillis() - start);
     }
 
     private int pruneFile(Path file, long cutoff) throws IOException {
@@ -331,7 +394,7 @@ public final class BackupService {
     }
 
     private int[] backupRegionFile(DimensionMapping mapping, Path mca, Path worldRoot,
-                                   int rx, int rz) throws IOException {
+                                   int rx, int rz, long backupTimestamp) throws IOException {
         Map<Long, RegionScanner.ScannedChunk> present = RegionScanner.scan(mca);
         if (present.isEmpty()) {
             return new int[] {0, 0};
@@ -348,7 +411,6 @@ public final class BackupService {
 
         // Gate: chunk changed iff its header timestamp is newer than the newest
         // chain-head timestamp across its section chains (0 if no segment yet).
-        long backupTimestamp = Instant.now().getEpochSecond();
         List<RegionScanner.ScannedChunk> changedChunks = new ArrayList<>();
         for (RegionScanner.ScannedChunk chunk : present.values()) {
             long headTs = headTimestamp(zvcr, chunk.localX(), chunk.localZ());

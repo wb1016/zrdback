@@ -4,6 +4,7 @@ plugins {
 
 base {
     archivesName = 'zvcr-java'
+    version = mod_version
 }
 
 repositories {
@@ -18,10 +19,23 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
+processResources {
+    inputs.property 'mod_version', mod_version
+    filesMatching('fabric.mod.json') {
+        expand 'mod_version': mod_version
+    }
+}
+
 test {
     useJUnitPlatform()
     testLogging {
         events 'failed', 'skipped'
         exceptionFormat 'full'
     }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << "-Xlint:deprecation"
+    options.encoding = "UTF-8"
+    options.release = Integer.parseInt(project.java_version)
 }
