@@ -1,0 +1,10 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${fabric_loom_version}" apply false
+}
+
+subprojects {
+    tasks.withType(JavaCompile).configureEach {
+        it.options.release = project.java_version as Integer
+        options.encoding = 'UTF-8'
+    }
+}

@@ -1,0 +1,523 @@
+/*
+ * ZRDBack — Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltDev
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ *
+ * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
+ * by crane are licensed under the GNU Lesser General Public License v3.
+ */
+package space.cobaltworks.zrdback.backup;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.storage.LevelResource;
+
+import space.cobaltworks.zrdback.zvcr.Zvcr;
+import space.cobaltworks.zrdback.zvcr.format.DeltaInsertionResult;
+import space.cobaltworks.zrdback.zvcr.format.PackedData;
+import space.cobaltworks.zrdback.zvcr.format.PackedDeltaData;
+import space.cobaltworks.zrdback.zvcr.format.PackedSnapshot;
+import space.cobaltworks.zrdback.zvcr.io.ZvcrFiles;
+import space.cobaltworks.zrdback.zvcr.io.ZvcrReader;
+import space.cobaltworks.zrdback.zvcr.io.ZvcrWriter;
+import space.cobaltworks.zrdback.zvcr.region.Dimension;
+import space.cobaltworks.zrdback.zvcr.region.RegionLocation;
+import space.cobaltworks.zrdback.zvcr.region.Segment;
+import space.cobaltworks.zrdback.zvcr.region.ZvcrFile;
+import space.cobaltworks.zrdback.BackupConfig;
+
+/**
+ * The backup engine: a read-only observer of the live world save that writes
+ * incremental ZVCR-3D backups.
+ *
+ * <p>Flow per region file: header-only scan (8 KiB) → change gate
+ * ({@code offset != 0 && headerTimestamp > chain-head timestamp}) → read only
+ * the changed chunks via vanilla {@code RegionFile} → semantic diff against
+ * the existing ZVCR chain head → insert. Unchanged chunks cost an in-memory
+ * timestamp compare.
+ */
+public final class BackupService {
+
+    private static final org.slf4j.Logger LOGGER =
+            org.slf4j.LoggerFactory.getLogger(BackupService.class);
+
+    private final BackupConfig config;
+    private final MinecraftServer server;
+
+    public BackupService(BackupConfig config, MinecraftServer server) {
+        this.config = config;
+        this.server = server;
+    }
+
+    public Path outputDirectory() {
+        return config.outputDirectory();
+    }
+
+    public int intervalMinutes() {
+        return config.intervalMinutes();
+    }
+
+    public int checkpointInterval() {
+        return config.checkpointInterval();
+    }
+
+    /**
+     * Restores the world as of {@code timestamp} into
+     * {@code <output>/restore/<timestamp>/} — never into the live world save.
+     */
+    public WorldRestorer.Result restore(long timestamp) throws IOException {
+        return new WorldRestorer(config, server).restore(timestamp);
+    }
+
+    /**
+     * Aggregate statistics over all backup files — chain lengths, palette
+     * dedup effectiveness, blob store size. Used to tune the checkpoint
+     * interval (HANDOFF §11.2).
+     */
+    public Stats stats() throws IOException {
+        int files = 0;
+        long fileBytes = 0;
+        int segments = 0;
+        int chains = 0;
+        long chainEntries = 0;
+        int minChain = Integer.MAX_VALUE;
+        int maxChain = 0;
+        long teDeltas = 0;
+        java.util.Set<space.cobaltworks.zrdback.zvcr.format.Palette> distinctPalettes = new java.util.HashSet<>();
+        long paletteRefs = 0;
+
+        for (Dimension dimension : Dimension.values()) {
+            Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
+            if (!Files.isDirectory(dimDir)) {
+                continue;
+            }
+            try (Stream<Path> walk = Files.walk(dimDir)) {
+                for (Path file : walk.filter(f -> f.getFileName().toString().endsWith(".zvcr3d")).toList()) {
+                    files++;
+                    fileBytes += Files.size(file);
+                    ZvcrFile zvcr = ZvcrFiles.readFile(file);
+                    for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
+                        Segment segment = zvcr.region.get(i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
+                                i % Zvcr.REGION_SIDELENGTH_SEGMENTS).orElse(null);
+                        if (segment == null) {
+                            continue;
+                        }
+                        segments++;
+                        teDeltas += segment.tileEntities.size();
+                        for (int s = 0; s < segment.sectionCount; s++) {
+                            for (PackedDeltaData chain : new PackedDeltaData[] {
+                                    segment.blockSections.section(s),
+                                    segment.biomeSections.section(s)}) {
+                                int size = chain.reverseDeltas().size();
+                                if (size == 0) {
+                                    continue;
+                                }
+                                chains++;
+                                chainEntries += size;
+                                minChain = Math.min(minChain, size);
+                                maxChain = Math.max(maxChain, size);
+                                for (var snapshot : chain.reverseDeltas()) {
+                                    if (snapshot.data() instanceof PackedData.Paletted paletted) {
+                                        paletteRefs++;
+                                        distinctPalettes.add(paletted.palette());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (minChain == Integer.MAX_VALUE) {
+            minChain = 0;
+        }
+        FileBlobStore blobs = FileBlobStore.open(config.outputDirectory());
+        return new Stats(files, fileBytes, segments, chains, chainEntries, minChain, maxChain,
+                teDeltas, distinctPalettes.size(), paletteRefs,
+                blobs.trackedFileCount(), blobs.blobCount(), blobs.blobBytes());
+    }
+
+    public record Stats(int files, long fileBytes, int segments, int chains, long chainEntries,
+                        int minChain, int maxChain, long teDeltas,
+                        long distinctPalettes, long paletteRefs,
+                        int trackedFiles, int blobCount, long blobBytes) {
+        public double avgChain() {
+            return chains == 0 ? 0 : (double) chainEntries / chains;
+        }
+
+        /** Fraction of paletted snapshots sharing a deduplicated palette. */
+        public double paletteDedupRatio() {
+            return paletteRefs == 0 ? 1.0 : (double) distinctPalettes / paletteRefs;
+        }
+    }
+
+    public String statusLine() {
+        StringBuilder sb = new StringBuilder("ZVCR Backup: output=").append(config.outputDirectory())
+                .append(", interval=").append(config.intervalMinutes()).append(" min")
+                .append(", checkpoint-interval=").append(config.checkpointInterval());
+        try {
+            FileBlobStore blobs = FileBlobStore.open(config.outputDirectory());
+            sb.append(", tracked-files=").append(blobs.trackedFileCount())
+                    .append(", blobs=").append(blobs.blobCount())
+                    .append(" (").append(blobs.blobBytes() / 1024).append(" KiB)");
+        } catch (IOException e) {
+            sb.append(", blob-store unavailable");
+        }
+        return sb.toString();
+    }
+
+    public record Result(int regionsScanned, int chunksChanged, int chunksInserted,
+                         int blobsStored, int entriesPruned, long durationMs) {}
+
+    /** Runs a full incremental backup across all supported dimensions. */
+    public Result runBackup() throws IOException {
+        long start = System.currentTimeMillis();
+        Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
+        Files.createDirectories(config.outputDirectory());
+
+        int regions = 0;
+        int changed = 0;
+        int inserted = 0;
+
+        for (DimensionMapping mapping : DimensionMapping.values()) {
+            // 26.x layout: world/dimensions/<ns>/<path>/region — resolved via the
+            // vanilla API rather than hardcoded directory names.
+            Path regionDir = net.minecraft.world.level.dimension.DimensionType
+                    .getStorageFolder(mapping.levelKey(), worldRoot).resolve("region");
+            if (!Files.isDirectory(regionDir)) {
+                continue;
+            }
+            try (Stream<Path> files = Files.list(regionDir)) {
+                for (Path mca : files.filter(f -> f.getFileName().toString().endsWith(".mca")).toList()) {
+                    String fileName = mca.getFileName().toString();
+                    long[] coords = RegionScanner.parseRegionCoords(fileName);
+                    if (coords == null) {
+                        continue;
+                    }
+                    regions++;
+                    int[] counts = backupRegionFile(mapping, mca, worldRoot,
+                            (int) coords[0], (int) coords[1]);
+                    changed += counts[0];
+                    inserted += counts[1];
+                }
+            }
+        }
+
+        long backupTimestamp = Instant.now().getEpochSecond();
+        int blobsStored = backupAuxiliaryFiles(worldRoot, backupTimestamp);
+
+        int pruned = 0;
+        if (config.retentionDays() > 0) {
+            pruned = prune(config.retentionDays()).chunksChanged();
+        }
+        return new Result(regions, changed, inserted, blobsStored, pruned,
+                System.currentTimeMillis() - start);
+    }
+
+    /**
+     * Backs up the files ZVCR does not model semantically into the
+     * content-addressed blob store: level.dat, players/, data/** (world gen
+     * settings, scoreboard, game rules, weather, ...), and per-dimension
+     * entities/, poi/ and data/** (raids, world border, dragon fight, ...).
+     *
+     * @return number of files with new content
+     */
+    private int backupAuxiliaryFiles(Path worldRoot, long timestamp) throws IOException {
+        FileBlobStore store = FileBlobStore.open(config.outputDirectory());
+        int stored = 0;
+        stored += storeOrCount(store, worldRoot, "level.dat", timestamp);
+        stored += storeOrCount(store, worldRoot, "level.dat_old", timestamp);
+        stored += walkAndStore(store, worldRoot, worldRoot.resolve("players"), timestamp);
+        stored += walkAndStore(store, worldRoot, worldRoot.resolve("data"), timestamp);
+        for (DimensionMapping mapping : DimensionMapping.values()) {
+            Path dimDir = net.minecraft.world.level.dimension.DimensionType
+                    .getStorageFolder(mapping.levelKey(), worldRoot);
+            stored += walkAndStore(store, worldRoot, dimDir.resolve("entities"), timestamp);
+            stored += walkAndStore(store, worldRoot, dimDir.resolve("poi"), timestamp);
+            stored += walkAndStore(store, worldRoot, dimDir.resolve("data"), timestamp);
+        }
+        store.flush();
+        return stored;
+    }
+
+    private static int storeOrCount(FileBlobStore store, Path worldRoot,
+                                    String relativePath, long timestamp) throws IOException {
+        return store.store(worldRoot, relativePath, timestamp) ? 1 : 0;
+    }
+
+    private static int walkAndStore(FileBlobStore store, Path worldRoot,
+                                    Path directory, long timestamp) throws IOException {
+        if (!Files.isDirectory(directory)) {
+            return 0;
+        }
+        int stored = 0;
+        try (Stream<Path> files = Files.walk(directory)) {
+            for (Path file : files.filter(Files::isRegularFile).toList()) {
+                String relative = worldRoot.relativize(file).toString().replace('\\', '/');
+                if (store.store(worldRoot, relative, timestamp)) {
+                    stored++;
+                }
+            }
+        }
+        return stored;
+    }
+
+    /** Prunes chain entries and blob history older than {@code retentionDays}. */
+    public Result prune(int retentionDays) throws IOException {
+        long start = System.currentTimeMillis();
+        long cutoff = Instant.now().getEpochSecond() - retentionDays * 86400L;
+        int regions = 0;
+        int pruned = 0;
+
+        for (Dimension dimension : Dimension.values()) {
+            Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
+            if (!Files.isDirectory(dimDir)) {
+                continue;
+            }
+            try (Stream<Path> files = Files.walk(dimDir)) {
+                for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".zvcr3d")).toList()) {
+                    regions++;
+                    pruned += pruneFile(file, cutoff);
+                }
+            }
+        }
+        pruned += FileBlobStore.open(config.outputDirectory()).prune(cutoff);
+        return new Result(regions, pruned, 0, 0, 0, System.currentTimeMillis() - start);
+    }
+
+    private int pruneFile(Path file, long cutoff) throws IOException {
+        ZvcrFile zvcr = ZvcrFiles.readFile(file);
+        int removed = 0;
+        for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
+            Segment segment = zvcr.region.get(i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
+                    i % Zvcr.REGION_SIDELENGTH_SEGMENTS).orElse(null);
+            if (segment == null) {
+                continue;
+            }
+            for (int s = 0; s < segment.sectionCount; s++) {
+                removed += segment.blockSections.section(s).truncateOlderThan(cutoff);
+                removed += segment.biomeSections.section(s).truncateOlderThan(cutoff);
+            }
+            removed += segment.tileEntities.truncateOlderThan(cutoff);
+            removed += segment.info.truncateOlderThan(cutoff);
+        }
+        if (removed > 0) {
+            ZvcrFiles.atomicWrite(file, ZvcrWriter.serialize(zvcr));
+        }
+        return removed;
+    }
+
+    private int[] backupRegionFile(DimensionMapping mapping, Path mca, Path worldRoot,
+                                   int rx, int rz) throws IOException {
+        Map<Long, RegionScanner.ScannedChunk> present = RegionScanner.scan(mca);
+        if (present.isEmpty()) {
+            return new int[] {0, 0};
+        }
+
+        RegionLocation location = new RegionLocation(rx, rz, mapping.dimension);
+        Path backupPath = location.filePath(config.outputDirectory());
+        ZvcrFile zvcr;
+        if (Files.exists(backupPath)) {
+            zvcr = ZvcrFiles.readFile(backupPath);
+        } else {
+            zvcr = new ZvcrFile(BackupConfig.PROTOCOL_VERSION, mapping.dimension);
+        }
+
+        // Gate: chunk changed iff its header timestamp is newer than the newest
+        // chain-head timestamp across its section chains (0 if no segment yet).
+        long backupTimestamp = Instant.now().getEpochSecond();
+        List<RegionScanner.ScannedChunk> changedChunks = new ArrayList<>();
+        for (RegionScanner.ScannedChunk chunk : present.values()) {
+            long headTs = headTimestamp(zvcr, chunk.localX(), chunk.localZ());
+            if (headTs == 0 || chunk.headerTimestamp() > headTs) {
+                changedChunks.add(chunk);
+            }
+        }
+        if (changedChunks.isEmpty()) {
+            return new int[] {0, 0};
+        }
+
+        ChunkExtractor extractor = new ChunkExtractor(
+                server.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.BIOME));
+        int inserted = 0;
+        try (ChunkReader reader = ChunkReader.open(mca, worldRoot.getFileName().toString(), mapping.levelKey)) {
+            for (RegionScanner.ScannedChunk chunk : changedChunks) {
+                CompoundTag chunkNbt = reader.readChunk(chunk.localX(), chunk.localZ());
+                if (chunkNbt == null) {
+                    continue; // vanished between scan and read
+                }
+                String status = chunkNbt.contains("Status")
+                        ? chunkNbt.getStringOr("Status", "") : "";
+                int namespaceSep = status.indexOf(':');
+                if (namespaceSep >= 0) {
+                    status = status.substring(namespaceSep + 1);
+                }
+                if (!status.equals("full")) {
+                    if (DEBUG) LOGGER.info("chunk {}.{} skipped: status={}", chunk.localX(), chunk.localZ(), status);
+                    continue; // not a fully generated chunk (matches the C++ import)
+                }
+                if (insertChunk(zvcr, chunk.localX(), chunk.localZ(), extractor.extract(chunkNbt, mapping.dimension),
+                        backupTimestamp)) {
+                    inserted++;
+                }
+            }
+        }
+        if (inserted > 0 || !Files.exists(backupPath)) {
+            ZvcrFiles.atomicWrite(backupPath, ZvcrWriter.serialize(zvcr));
+        }
+        return new int[] {changedChunks.size(), inserted};
+    }
+
+    private boolean insertChunk(ZvcrFile zvcr, int localX, int localZ,
+                                ChunkExtractor.ExtractedChunk extracted, long timestamp) {
+        if (DEBUG) {
+            LOGGER.info("chunk {}.{}: sections={} biomes={} tes={}", localX, localZ,
+                    countNonNull(extracted.blockSections), countNonNull(extracted.biomeSections),
+                    extracted.tileEntities.size());
+        }
+        Segment segment = zvcr.region.get(localX, localZ).orElse(null);
+        if (segment == null) {
+            segment = new Segment(zvcr.dimensionType);
+            zvcr.region.set(localX, localZ, segment);
+        }
+
+        boolean anyChange = false;
+        for (int s = 0; s < extracted.sectionCount; s++) {
+            int[] blocks = extracted.blockSections[s];
+            if (blocks != null) {
+                anyChange |= insertAndCheckpoint(segment.blockSections.section(s),
+                        new PackedSnapshot(PackedData.pack(blocks, true), timestamp));
+            }
+            int[] biomes = extracted.biomeSections[s];
+            if (biomes != null) {
+                anyChange |= insertAndCheckpoint(segment.biomeSections.section(s),
+                        new PackedSnapshot(PackedData.pack(biomes, true), timestamp));
+            }
+        }
+
+        DeltaInsertionResult teResult = segment.tileEntities.insertSnapshot(timestamp, extracted.tileEntities);
+        anyChange |= teResult instanceof DeltaInsertionResult.Success;
+
+        segment.info.insertSnapshot(new space.cobaltworks.zrdback.zvcr.region.SegmentState(
+                space.cobaltworks.zrdback.zvcr.region.SegmentStateType.NEW, timestamp));
+        return anyChange;
+    }
+
+    private boolean insertAndCheckpoint(PackedDeltaData chain, PackedSnapshot snapshot) {
+        DeltaInsertionResult result = chain.insertSnapshot(snapshot);
+        if (!(result instanceof DeltaInsertionResult.Success)) {
+            return false; // NO_CHANGES_MADE / SNAPSHOT_OLDER_THAN_LATEST: skip silently
+        }
+        maybeCheckpoint(chain);
+        return true;
+    }
+
+    /**
+     * Checkpoint policy: materialize the oldest state once
+     * {@code checkpointInterval} deltas have accumulated since the newest
+     * full snapshot. "Full" detection unpacks entries and checks for
+     * {@code 0xFFFF} atoms — sound in practice (0xFFFF is not a valid
+     * blockstate/biome ID), self-healing, and needs no sidecar state.
+     */
+    private void maybeCheckpoint(PackedDeltaData chain) {
+        List<PackedSnapshot> deltas = chain.reverseDeltas();
+        int deltasSinceFull = 0;
+        for (int i = 1; i < deltas.size(); i++) { // index 0 (head) is always full
+            if (looksFull(chain, deltas.get(i))) {
+                break;
+            }
+            deltasSinceFull++;
+        }
+        if (deltasSinceFull >= config.checkpointInterval()) {
+            chain.insertCheckpoint(deltas.size() - 1);
+        }
+    }
+
+    private static boolean looksFull(PackedDeltaData chain, PackedSnapshot snapshot) {
+        if (snapshot.data() instanceof PackedData.SingleValue) {
+            return true; // a single-value entry is always a full snapshot
+        }
+        int[] atoms = snapshot.data().unpack(chain.unpackedSize());
+        for (int atom : atoms) {
+            if (atom == Zvcr.STATE_UNCHANGED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int countNonNull(Object[] array) {
+        int count = 0;
+        for (Object o : array) {
+            if (o != null) count++;
+        }
+        return count;
+    }
+
+    private static final boolean DEBUG = false;
+
+    private static long headTimestamp(ZvcrFile zvcr, int localX, int localZ) {
+        Segment segment = zvcr.region.get(localX, localZ).orElse(null);
+        if (segment == null) {
+            return 0;
+        }
+        long max = 0;
+        for (int s = 0; s < segment.sectionCount; s++) {
+            var blockHead = segment.blockSections.section(s).latestSnapshot();
+            if (blockHead.isPresent() && blockHead.get().timestamp() > max) {
+                max = blockHead.get().timestamp();
+            }
+            var biomeHead = segment.biomeSections.section(s).latestSnapshot();
+            if (biomeHead.isPresent() && biomeHead.get().timestamp() > max) {
+                max = biomeHead.get().timestamp();
+            }
+        }
+        return max;
+    }
+
+    /** Maps a ZVCR dimension to its level key (paths come from DimensionType). */
+    private enum DimensionMapping {
+        OVERWORLD(Dimension.OVERWORLD, Level.OVERWORLD),
+        NETHER(Dimension.NETHER, Level.NETHER),
+        THE_END(Dimension.THE_END, Level.END);
+
+        private final Dimension dimension;
+        private final ResourceKey<Level> levelKey;
+
+        DimensionMapping(Dimension dimension, ResourceKey<Level> levelKey) {
+            this.dimension = dimension;
+            this.levelKey = levelKey;
+        }
+
+        Dimension dimension() {
+            return dimension;
+        }
+
+        ResourceKey<Level> levelKey() {
+            return levelKey;
+        }
+    }
+}

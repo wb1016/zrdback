@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "zrdback",
+  "version": "${mod_version}",
+  "name": "ZRDBack",
+  "description": "Super efficient, blazing fast backup mod powered by zstd and zvcr.",
+  "license": "GPL-3.0-or-later",
+  "environment": "*",
+  "authors": [
+    "CobaltDev"
+  ],
+  "contributors": [
+    "crayne"
+  ],
+  "entrypoints": {
+    "server": [
+      "space.cobaltworks.zrdback.ZrdBack"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=${fabric_loader_version}",
+    "fabric-api": "*",
+    "minecraft": ">=${minecraft_version}"
+  }
+}

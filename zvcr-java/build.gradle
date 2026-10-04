@@ -1,0 +1,27 @@
+plugins {
+    id 'java-library'
+}
+
+base {
+    archivesName = 'zvcr-java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    api "com.github.luben:zstd-jni:${zstd_jni_version}"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
