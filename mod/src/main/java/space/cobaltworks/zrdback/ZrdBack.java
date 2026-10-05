@@ -64,7 +64,7 @@ public final class ZrdBack implements ModInitializer {
     private static void onServerStarted(MinecraftServer server) {
         try {
             Path worldRoot = server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT);
-            BackupConfig config = BackupConfig.load(worldRoot);
+            BackupConfig config = BackupConfig.load(worldRoot, server.isDedicatedServer());
             BackupService service = new BackupService(config, server);
             SERVICE.set(service);
 

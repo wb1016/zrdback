@@ -34,7 +34,10 @@ import net.fabricmc.loader.api.FabricLoader;
  * <ul>
  *   <li>{@code output-directory} — backup storage root; empty = sibling
  *       {@code zrdback-backups} directory next to the world save (the world save
- *       folder itself is never written to).</li>
+ *       folder itself is never written to). On an integrated server
+ *       (singleplayer/LAN) the store is scoped per save:
+ *       {@code <root>/<world-folder-name>/}, because the world save's parent is
+ *       the shared {@code saves/} directory of the whole instance.</li>
  *   <li>{@code interval-minutes} — hourly cadence by default.</li>
  *   <li>{@code checkpoint-interval} — full snapshot every N deltas per chain.</li>
  *   <li>{@code threads} — worker threads for backup/prune; 0 = auto (half the
@@ -61,7 +64,7 @@ public final class BackupConfig {
         this.threads = threads;
     }
 
-    public static BackupConfig load(Path worldRoot) {
+    public static BackupConfig load(Path worldRoot, boolean dedicatedServer) {
         Path configDir = FabricLoader.getInstance().getConfigDir();
         Path configFile = configDir.resolve("zrdback.properties");
         Properties props = new Properties();
@@ -77,9 +80,17 @@ public final class BackupConfig {
         // relative; normalize so the backups land NEXT TO the world save, never
         // inside it.
         Path normalizedWorldRoot = worldRoot.toAbsolutePath().normalize();
-        Path outputDirectory = output.isEmpty()
+        Path base = output.isEmpty()
                 ? normalizedWorldRoot.getParent().resolve("zrdback-backups")
                 : Path.of(output).toAbsolutePath().normalize();
+        Path outputDirectory = resolveStoreRoot(base, normalizedWorldRoot, dedicatedServer);
+        if (!outputDirectory.equals(base) && Files.exists(base.resolve("files-index.json"))) {
+            ZrdBack.LOGGER.warn(
+                    "Found a legacy shared backup store at {} that mixed every singleplayer "
+                    + "save's backups into one directory; it is no longer used. Each save now "
+                    + "backs up into its own subdirectory ({}). Move or delete the old store "
+                    + "manually.", base, outputDirectory);
+        }
         int interval = parsePositive(props, "interval-minutes", 60);
         int checkpoint = parsePositive(props, "checkpoint-interval", 32);
         // 0 disables automatic pruning (manual /backup prune <days> still works).
@@ -90,6 +101,22 @@ public final class BackupConfig {
             throw new IllegalStateException("threads must be >= 0: " + threads);
         }
         return new BackupConfig(outputDirectory, interval, checkpoint, retention, threads);
+    }
+
+    /**
+     * Resolves the per-save store root from the configured base directory.
+     *
+     * <p>A dedicated server hosts exactly one world, so the base is used as-is
+     * (flat layout, compatible with existing server stores). An integrated
+     * server (singleplayer/LAN) shares one {@code saves/} directory across all
+     * worlds of the instance — without scoping, every save's backups would mix
+     * into one store and prune/retention/restore would hit other saves' data.
+     */
+    static Path resolveStoreRoot(Path base, Path normalizedWorldRoot, boolean dedicatedServer) {
+        if (dedicatedServer) {
+            return base;
+        }
+        return base.resolve(normalizedWorldRoot.getFileName().toString());
     }
 
     private static int parsePositive(Properties props, String key, int fallback) {

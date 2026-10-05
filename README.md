@@ -139,11 +139,17 @@ Configuration lives under `config/zrdback.properties`
 
 | Property | Default | Meaning |
 |---|---|---|
-| `output-directory` | (empty) | Backup storage root. Empty = `zrdback-backups/` next to the world save (never inside it). |
+| `output-directory` | (empty) | Backup storage root. Empty = `zrdback-backups/` next to the world save (never inside it). In singleplayer the store is scoped per save: `<root>/<world-name>/`. |
 | `interval-minutes` | `60` | Minutes between automatic backups. |
 | `checkpoint-interval` | `32` | Full snapshot every N deltas per chain (bounds reconstruction cost). |
 | `retention-days` | `0` | Auto-prune entries older than N days after each backup. `0` = keep forever. |
 | `threads` | `0` | Worker threads for backup/prune. `0` = auto (half the cores, min 1). Workers run at minimum priority so ticks are served first. |
+
+In singleplayer the world save's parent is the shared `saves/` directory of the
+whole instance, so the store root is always scoped per save
+(`<output-directory or default>/<world-name>/`) — backups, prune, retention and
+restore only ever touch the current save. Dedicated servers host one world per
+process and keep the flat layout.
 
 ## Commands
 
