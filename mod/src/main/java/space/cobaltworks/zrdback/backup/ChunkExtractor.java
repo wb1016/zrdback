@@ -81,6 +81,8 @@ public final class ChunkExtractor {
 
     public ExtractedChunk extract(CompoundTag chunk, Dimension dimension) {
         ExtractedChunk out = new ExtractedChunk(dimension.sectionCount());
+        int chunkX = chunk.getIntOr("xPos", 0);
+        int chunkZ = chunk.getIntOr("zPos", 0);
 
         ListTag sections = chunk.getListOrEmpty("sections");
         for (int i = 0; i < sections.size(); i++) {
@@ -102,7 +104,7 @@ public final class ChunkExtractor {
         ListTag blockEntities = chunk.getListOrEmpty("block_entities");
         for (int i = 0; i < blockEntities.size(); i++) {
             CompoundTag teTag = blockEntities.getCompoundOrEmpty(i);
-            TileEntity te = extractTileEntity(teTag, dimension);
+            TileEntity te = extractTileEntity(teTag, chunkX, chunkZ, dimension);
             if (te != null) {
                 out.tileEntities.add(te);
             }
@@ -110,7 +112,8 @@ public final class ChunkExtractor {
         return out;
     }
 
-    private TileEntity extractTileEntity(CompoundTag teTag, Dimension dimension) {
+    private TileEntity extractTileEntity(CompoundTag teTag, int chunkX, int chunkZ,
+                                         Dimension dimension) {
         if (!teTag.contains("id") || !teTag.contains("x") || !teTag.contains("y") || !teTag.contains("z")) {
             return null;
         }
@@ -125,9 +128,21 @@ public final class ChunkExtractor {
             return null; // unknown TE type; skip rather than fail the backup
         }
 
-        int x = teTag.getIntOr("x", 0);
+        // ZVCR stores chunk-LOCAL x/z (uint8) and y relative to the dimension
+        // floor (uint16). Masking the world coordinates instead silently
+        // wrapped every 256 blocks and mirrored negative chunks to the far
+        // positive side — vanilla then rejected the TEs on restore ("found in
+        // a wrong chunk").
+        int localX = teTag.getIntOr("x", 0) - chunkX * 16;
+        int localZ = teTag.getIntOr("z", 0) - chunkZ * 16;
         int y = teTag.getIntOr("y", 0) - dimension.minY;
-        int z = teTag.getIntOr("z", 0);
+        if (localX < 0 || localX > 0xFF || localZ < 0 || localZ > 0xFF
+                || y < 0 || y > 0xFFFF) {
+            LOGGER.warn("Tile entity at world ({}, {}, {}) outside its chunk ({}, {}); skipped",
+                    teTag.getIntOr("x", 0), teTag.getIntOr("y", 0), teTag.getIntOr("z", 0),
+                    chunkX, chunkZ);
+            return null;
+        }
 
         CompoundTag payload = teTag.copy();
         payload.remove("id");
@@ -144,8 +159,7 @@ public final class ChunkExtractor {
         } catch (IOException e) {
             throw new IllegalStateException("NBT serialization failed", e);
         }
-        return new TileEntity(typeId,
-                new TileEntityPosition(x & 0xFF, z & 0xFF, y & 0xFFFF), nbt);
+        return new TileEntity(typeId, new TileEntityPosition(localX, localZ, y), nbt);
     }
 
     /**
@@ -203,8 +217,8 @@ public final class ChunkExtractor {
                 return block == null ? -1 : Block.BLOCK_STATE_REGISTRY.getId(block.defaultBlockState());
             }
             if (entry instanceof CompoundTag compound) {
-                BlockState state = NbtUtils.readBlockState(BuiltInRegistries.BLOCK, compound);
-                return Block.BLOCK_STATE_REGISTRY.getId(state);
+                BlockState state = readBlockStateAnyFormat(compound);
+                return state == null ? -1 : Block.BLOCK_STATE_REGISTRY.getId(state);
             }
             return -1;
         }
@@ -215,6 +229,42 @@ public final class ChunkExtractor {
                 : entry.asString().orElse("");
         Biome biome = biomes.getValue(Identifier.parse(key));
         return biome == null ? -1 : biomes.getId(biome);
+    }
+
+    /**
+     * Reads a blockstate from a palette entry in either disc format: 26.3's
+     * {@code {id, properties}} (via the vanilla helper) or the legacy
+     * {@code {Name, Properties}} of worlds saved by older versions. The legacy
+     * form matters because vanilla only upgrades chunks it actually loads — a
+     * world opened once has most chunks still on disk in the old format, and
+     * feeding {@code {Name: ...}} to the 26.3 helper silently yields air.
+     */
+    private BlockState readBlockStateAnyFormat(CompoundTag tag) {
+        if (tag.contains("id")) {
+            return NbtUtils.readBlockState(BuiltInRegistries.BLOCK, tag);
+        }
+        String name = tag.getStringOr("Name", "");
+        Block block = name.isEmpty() ? null
+                : BuiltInRegistries.BLOCK.getValue(Identifier.parse(name));
+        if (block == null) {
+            return null;
+        }
+        BlockState state = block.defaultBlockState();
+        CompoundTag props = tag.getCompoundOrEmpty("Properties");
+        for (String key : props.keySet()) {
+            net.minecraft.world.level.block.state.properties.Property<?> property =
+                    block.getStateDefinition().getProperty(key);
+            if (property != null) {
+                state = applyProperty(state, property, props.getStringOr(key, ""));
+            }
+        }
+        return state;
+    }
+
+    private static <T extends Comparable<T>> BlockState applyProperty(
+            BlockState state, net.minecraft.world.level.block.state.properties.Property<T> property,
+            String value) {
+        return property.getValue(value).map(v -> state.setValue(property, v)).orElse(state);
     }
 
     /** Unwraps vanilla's heterogeneous-list wrapper compounds ({"": value}). */

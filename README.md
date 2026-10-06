@@ -29,7 +29,7 @@ zrdback
 │                         (region files processed in parallel by nice-19 workers)
 ├── FileBlobStore        content-addressed blobs for non-chunk files (level.dat, players, ...)
 ├── WorldRestorer        reconstructs a bootable world from any timestamp
- └── /zrdback             now | prune | restore | stats | status
+ └── /zrdback             now | prune | restore | list | stats | status
 ```
 
 # Performance
@@ -119,7 +119,8 @@ and the parent directory is fsynced. A crash mid-backup never corrupts the previ
 ## Restore
 
 `/zrdback restore <timestamp|latest>` reconstructs a complete, bootable world into
-`<output>/restore/<timestamp>/`; never into the live world.
+`<output>/restore/<timestamp>/`; never into the live world. Restoring the same
+timestamp again replaces the previous output.
 
 - Region files are rebuilt from the chains at the target timestamp (vanilla
   `PalettedContainer`s, written through vanilla `RegionFile`).
@@ -127,9 +128,17 @@ and the parent directory is fsynced. A crash mid-backup never corrupts the previ
 - Auxiliary files come from the blob store at the same timestamp.
 - Restored chunks carry the current `DataVersion` and `isLightOn=false`; vanilla recomputes
   light and heightmaps on load.
+- Only fully generated chunks are backed up (ZVCR-3D stores chunk semantics).
+  Proto-chunks (structure starts, terrain in progress) are not covered — the
+  restored world regenerates them on first load, which vanilla reproduces
+  deterministically from the world seed. Worldgen-modifying mods may change
+  that.
 
-To use a restore: stop the server, replace the world folder with the restore directory's
-contents, start the server.
+To use a restore: stop the server, delete the target world folder, then copy
+the restore directory's contents into its place, start the server. Never copy
+the restore output into an existing world folder (leftover region files from the
+old world would mix with the restored ones), and never copy it while the server
+has the world open (vanilla's exit save would overwrite it).
 
 # Usage
 
@@ -153,10 +162,15 @@ process and keep the flat layout.
 
 ## Commands
 
+Every backup first asks vanilla to save (`saveEverything`): chunks, `level.dat`
+and player data are flushed to disk before the snapshot, so inventory, position
+and recent edits are never lost to the autosave interval.
+
 | Command | Effect |
 |---|---|
 | `/zrdback now` | Run an incremental backup immediately. |
 | `/zrdback restore <timestamp\|latest>` | Reconstruct the world as of a unix timestamp into `<output>/restore/<timestamp>/`. |
+| `/zrdback list [min-days] [max-days] [skip-nums] [keep-nums]` | List restore-point timestamps, newest first, whose age is between `min-days` and `max-days` (inclusive; `max-days` 0 = unbounded), after skipping the `skip-nums` newest; shows at most `keep-nums` (default 50). Omitted: min 0, max unbounded, skip 0. |
 | `/zrdback prune <days>` | Drop chain/blob history older than N days (newest state is always kept), GC unreferenced blobs. |
 | `/zrdback stats` | Chain lengths, palette dedup ratio, blob store size for tuning `checkpoint-interval`. |
 | `/zrdback status` | Config summary + blob store size. |

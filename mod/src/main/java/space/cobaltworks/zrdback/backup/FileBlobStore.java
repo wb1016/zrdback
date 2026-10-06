@@ -30,6 +30,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Stream;
 
 import com.google.gson.Gson;
@@ -194,6 +196,21 @@ public final class FileBlobStore {
     /** Number of tracked files. */
     public int trackedFileCount() {
         return index.files.size();
+    }
+
+    /**
+     * Distinct backup timestamps recorded across all tracked-file histories.
+     * A backup run that changed no tracked file is absent — but then it also
+     * stored no new state, so there is nothing to restore for it.
+     */
+    public Set<Long> timestamps() {
+        Set<Long> stamps = new TreeSet<>();
+        for (List<Entry> history : index.files.values()) {
+            for (Entry entry : history) {
+                stamps.add(entry.timestamp());
+            }
+        }
+        return stamps;
     }
 
     /** Number of distinct blobs on disk. */

@@ -38,6 +38,9 @@ import space.cobaltworks.zrdback.backup.BackupService;
  */
 public final class BackupCommands {
 
+    /** Default page size for {@code /zrdback list}: keeps the console readable. */
+    private static final int LIST_DEFAULT_KEEP = 50;
+
     private BackupCommands() {}
 
     public static LiteralArgumentBuilder<CommandSourceStack> build(
@@ -159,6 +162,30 @@ public final class BackupCommands {
                     });
                     return 1;
                 }))
+                .then(Commands.literal("list")
+                        .executes(context -> executeList(context.getSource(), serviceSupplier,
+                                0, 0, 0, LIST_DEFAULT_KEEP))
+                        .then(Commands.argument("min-days", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                .executes(context -> executeList(context.getSource(), serviceSupplier,
+                                        com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
+                                        0, 0, LIST_DEFAULT_KEEP))
+                                .then(Commands.argument("max-days", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                        .executes(context -> executeList(context.getSource(), serviceSupplier,
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "max-days"),
+                                                0, LIST_DEFAULT_KEEP))
+                                        .then(Commands.argument("skip-nums", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                                .executes(context -> executeList(context.getSource(), serviceSupplier,
+                                                        com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
+                                                        com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "max-days"),
+                                                        com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "skip-nums"),
+                                                        LIST_DEFAULT_KEEP))
+                                                .then(Commands.argument("keep-nums", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                                        .executes(context -> executeList(context.getSource(), serviceSupplier,
+                                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
+                                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "max-days"),
+                                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "skip-nums"),
+                                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "keep-nums"))))))))
                 .then(Commands.literal("status").executes(context -> {
                     BackupService service = requireService(context.getSource(), serviceSupplier);
                     if (service == null) {
@@ -220,6 +247,79 @@ public final class BackupCommands {
         } catch (Exception e) {
             source.sendSystemMessage(Component.literal("debug failed: " + e));
         }
+    }
+
+    /**
+     * {@code /zrdback list [min-days] [max-days] [skip-nums] [keep-nums]}
+     * — lists restore-point timestamps. Omitted args: min 0, max unbounded
+     * (also when given as 0), skip 0, keep {@value #LIST_DEFAULT_KEEP}.
+     */
+    private static int executeList(CommandSourceStack source,
+                                   java.util.function.Supplier<BackupService> serviceSupplier,
+                                   int minDays, int maxDays, int skipNums, int keepNums) {
+        BackupService service = requireService(source, serviceSupplier);
+        if (service == null) {
+            return 0;
+        }
+        enqueue(source, "List started", () -> {
+            try {
+                return formatList(service.listBackups(minDays, maxDays, skipNums, keepNums),
+                        minDays, maxDays);
+            } catch (java.io.IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        return 1;
+    }
+
+    private static String formatList(BackupService.BackupList list, int minDays, int maxDays) {
+        StringBuilder sb = new StringBuilder("ZVCR Backup: ").append(list.totalInRange())
+                .append(" backup(s) ").append(ageRange(minDays, maxDays))
+                .append(" (store total ").append(list.totalStore()).append(')');
+        if (list.timestamps().isEmpty()) {
+            return sb.toString();
+        }
+        sb.append(", showing ").append(list.timestamps().size())
+                .append(" (skipped ").append(list.skipped()).append(" newest):");
+        for (long timestamp : list.timestamps()) {
+            sb.append("\n  ").append(timestamp)
+                    .append("  ").append(java.time.Instant.ofEpochSecond(timestamp))
+                    .append("  (").append(humanAge(list.queriedAt() - timestamp)).append(')');
+        }
+        return sb.toString();
+    }
+
+    /** Range descriptor matching the command's day arguments. */
+    private static String ageRange(int minDays, int maxDays) {
+        if (minDays <= 0 && maxDays <= 0) {
+            return "of any age";
+        }
+        if (minDays <= 0) {
+            return "up to " + maxDays + " days old";
+        }
+        if (maxDays <= 0) {
+            return minDays + "+ days old";
+        }
+        return "between " + minDays + " and " + maxDays + " days old";
+    }
+
+    private static String humanAge(long seconds) {
+        if (seconds < 0) {
+            return "in the future";
+        }
+        long days = seconds / 86400;
+        long hours = seconds % 86400 / 3600;
+        long minutes = seconds % 3600 / 60;
+        if (days > 0) {
+            return days + "d " + hours + "h ago";
+        }
+        if (hours > 0) {
+            return hours + "h " + minutes + "m ago";
+        }
+        if (minutes > 0) {
+            return minutes + "m ago";
+        }
+        return seconds + "s ago";
     }
 
     private static void enqueue(CommandSourceStack source, String startedMessage,

@@ -25,8 +25,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -51,12 +55,16 @@ import space.cobaltworks.zrdback.zvcr.io.ZvcrWriter;
 import space.cobaltworks.zrdback.zvcr.region.Dimension;
 import space.cobaltworks.zrdback.zvcr.region.RegionLocation;
 import space.cobaltworks.zrdback.zvcr.region.Segment;
+import space.cobaltworks.zrdback.zvcr.region.SegmentState;
+import space.cobaltworks.zrdback.zvcr.region.TileEntityListDelta;
 import space.cobaltworks.zrdback.zvcr.region.ZvcrFile;
 import space.cobaltworks.zrdback.BackupConfig;
 
 /**
- * The backup engine: a read-only observer of the live world save that writes
- * incremental ZVCR-3D backups.
+ * The backup engine: observes the live world save and writes incremental
+ * ZVCR-3D backups. The mod never writes to the world folder itself, but each
+ * backup first asks vanilla to flush its unsaved state (chunks, level.dat,
+ * player data) so the snapshot is current, not the last autosave.
  *
  * <p>Flow per region file: header-only scan (8 KiB) → change gate
  * ({@code offset != 0 && headerTimestamp > chain-head timestamp}) → read only
@@ -179,6 +187,118 @@ public final class BackupService {
         }
     }
 
+    /** One page of {@code /zrdback list} output. */
+    public record BackupList(long queriedAt, int totalStore, int totalInRange, int skipped,
+                             List<Long> timestamps, long durationMs) {}
+
+    /**
+     * Lists restore points: newest first, restricted to backups whose age at
+     * query time is within {@code [minDays, maxDays]} days (both inclusive;
+     * {@code maxDays} 0 = unbounded), skipping the {@code skipNums} newest and
+     * returning at most {@code keepNums}.
+     */
+    public BackupList listBackups(int minDays, int maxDays, int skipNums, int keepNums)
+            throws IOException {
+        long start = System.currentTimeMillis();
+        BackupList windowed = window(backupTimestamps(), Instant.now().getEpochSecond(),
+                minDays, maxDays, skipNums, keepNums);
+        return new BackupList(windowed.queriedAt(), windowed.totalStore(), windowed.totalInRange(),
+                windowed.skipped(), windowed.timestamps(), System.currentTimeMillis() - start);
+    }
+
+    /**
+     * Pure windowing behind {@link #listBackups} (unit-tested without a store).
+     * A timestamp in the future relative to {@code now} (clock skew) has a
+     * negative age and is never listed.
+     */
+    static BackupList window(Collection<Long> timestamps, long now,
+                             int minDays, int maxDays, int skipNums, int keepNums) {
+        long minAge = minDays * 86400L;
+        long maxAge = maxDays <= 0 ? Long.MAX_VALUE : maxDays * 86400L;
+        List<Long> sorted = timestamps.stream().distinct()
+                .sorted(Comparator.reverseOrder()).toList();
+        List<Long> inRange = new ArrayList<>();
+        for (long timestamp : sorted) {
+            long age = now - timestamp;
+            if (age < minAge) {
+                continue; // too young; sorted newest-first, later ones are older
+            }
+            if (age > maxAge) {
+                break; // too old; everything after is older still
+            }
+            inRange.add(timestamp);
+        }
+        int skipped = Math.min(Math.max(skipNums, 0), inRange.size());
+        int keep = Math.max(keepNums, 0);
+        List<Long> page = List.copyOf(
+                inRange.subList(skipped, Math.min(skipped + keep, inRange.size())));
+        return new BackupList(now, sorted.size(), inRange.size(), skipped, page, 0);
+    }
+
+    /**
+     * Every distinct restore-point timestamp in the store: chain-entry,
+     * segment-state and tile-entity-delta timestamps from all {@code .zvcr3d}
+     * files, plus blob-store history timestamps. A run that changed nothing
+     * leaves no timestamp anywhere — and nothing to restore — so it is
+     * correctly absent. Region files are independent, so they are harvested in
+     * parallel on the worker pool (same memory profile as {@link #prune}).
+     */
+    public TreeSet<Long> backupTimestamps() throws IOException {
+        List<Path> files = new ArrayList<>();
+        for (Dimension dimension : Dimension.values()) {
+            Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
+            if (!Files.isDirectory(dimDir)) {
+                continue;
+            }
+            try (Stream<Path> stream = Files.walk(dimDir)) {
+                files.addAll(stream
+                        .filter(f -> f.getFileName().toString().endsWith(".zvcr3d"))
+                        .toList());
+            }
+        }
+
+        TreeSet<Long> stamps = new TreeSet<>();
+        try (ExecutorService pool = newWorkerPool()) {
+            List<Future<TreeSet<Long>>> futures = new ArrayList<>(files.size());
+            for (Path file : files) {
+                futures.add(pool.submit(() -> fileTimestamps(file)));
+            }
+            for (Future<TreeSet<Long>> future : futures) {
+                stamps.addAll(await(future, "List"));
+            }
+        }
+        stamps.addAll(FileBlobStore.open(config.outputDirectory()).timestamps());
+        return stamps;
+    }
+
+    /** Distinct timestamps of one {@code .zvcr3d} file's chains. */
+    private static TreeSet<Long> fileTimestamps(Path file) throws IOException {
+        ZvcrFile zvcr = ZvcrFiles.readFile(file);
+        TreeSet<Long> stamps = new TreeSet<>();
+        for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
+            Segment segment = zvcr.region.get(i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
+                    i % Zvcr.REGION_SIDELENGTH_SEGMENTS).orElse(null);
+            if (segment == null) {
+                continue;
+            }
+            for (SegmentState state : segment.info.segmentStates()) {
+                stamps.add(state.timestamp());
+            }
+            for (TileEntityListDelta delta : segment.tileEntities.reverseDeltas()) {
+                stamps.add(delta.timestamp());
+            }
+            for (int s = 0; s < segment.sectionCount; s++) {
+                for (PackedDeltaData chain : new PackedDeltaData[] {
+                        segment.blockSections.section(s), segment.biomeSections.section(s)}) {
+                    for (PackedSnapshot snapshot : chain.reverseDeltas()) {
+                        stamps.add(snapshot.timestamp());
+                    }
+                }
+            }
+        }
+        return stamps;
+    }
+
     public String statusLine() {
         StringBuilder sb = new StringBuilder("ZVCR Backup: output=").append(config.outputDirectory())
                 .append(", interval=").append(config.intervalMinutes()).append(" min")
@@ -200,6 +320,7 @@ public final class BackupService {
     /** Runs a full incremental backup across all supported dimensions. */
     public Result runBackup() throws IOException {
         long start = System.currentTimeMillis();
+        flushWorldSave();
         Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
         Files.createDirectories(config.outputDirectory());
         // One timestamp for the whole run: the change gate (chunk header newer
@@ -255,6 +376,41 @@ public final class BackupService {
                 System.currentTimeMillis() - start);
     }
 
+    /**
+     * Asks vanilla to flush its unsaved state (chunks, level.dat, player data)
+     * before the backup reads the world from disk. Without this the backup
+     * captures the last autosave — player inventory, position and recent edits
+     * live only in memory until vanilla's pause/autosave/exit save, so a
+     * restore could roll them back arbitrarily far.
+     *
+     * <p>The save must run on the server thread; this hops there and waits
+     * (bounded, so a stopping server can't hang the backup thread). The mod
+     * itself still never writes to the world folder — vanilla does.
+     */
+    private void flushWorldSave() throws IOException {
+        CompletableFuture<Void> flushed = new CompletableFuture<>();
+        server.execute(() -> {
+            try {
+                server.saveEverything(true, true, false);
+            } catch (RuntimeException e) {
+                LOGGER.warn("Pre-backup save failed; backing up the last saved state", e);
+            } finally {
+                flushed.complete(null);
+            }
+        });
+        try {
+            flushed.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            LOGGER.warn("Pre-backup save did not finish within 60s; backing up the last saved state");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Pre-backup save interrupted", e);
+        } catch (ExecutionException e) {
+            // the future is only completed normally; unreachable, but get() declares it
+            throw new IOException("Pre-backup save failed", e);
+        }
+    }
+
     private ExecutorService newWorkerPool() {
         // Auto = half the cores: on SMT CPUs that matches the physical core
         // count (the sweet spot for zlib/zstd work) and leaves logical siblings
@@ -305,6 +461,7 @@ public final class BackupService {
         stored += storeOrCount(store, worldRoot, "level.dat_old", timestamp);
         stored += walkAndStore(store, worldRoot, worldRoot.resolve("players"), timestamp);
         stored += walkAndStore(store, worldRoot, worldRoot.resolve("data"), timestamp);
+        stored += walkAndStore(store, worldRoot, worldRoot.resolve("datapacks"), timestamp);
         for (DimensionMapping mapping : DimensionMapping.values()) {
             Path dimDir = net.minecraft.world.level.dimension.DimensionType
                     .getStorageFolder(mapping.levelKey(), worldRoot);

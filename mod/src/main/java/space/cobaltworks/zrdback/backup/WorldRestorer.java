@@ -25,6 +25,7 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -96,11 +97,25 @@ public final class WorldRestorer {
     public Result restore(long timestamp) throws IOException {
         long start = System.currentTimeMillis();
         Path targetRoot = config.outputDirectory().resolve("restore").resolve(Long.toString(timestamp));
+        if (Files.isDirectory(targetRoot)) {
+            // A previous restore to the same timestamp may have left files the
+            // current store no longer produces (deleted regions, pruned
+            // history); remove them so the output is exactly this restore.
+            deleteRecursively(targetRoot);
+        }
         Files.createDirectories(targetRoot);
 
         int chunks = restoreRegions(timestamp, targetRoot);
         int files = FileBlobStore.open(config.outputDirectory()).restore(timestamp, targetRoot);
         return new Result(chunks, files, targetRoot, System.currentTimeMillis() - start);
+    }
+
+    private static void deleteRecursively(Path root) throws IOException {
+        try (Stream<Path> walk = Files.walk(root)) {
+            for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+                Files.delete(path);
+            }
+        }
     }
 
     private int restoreRegions(long timestamp, Path targetRoot) throws IOException {
