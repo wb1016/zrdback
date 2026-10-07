@@ -22,6 +22,7 @@ package space.cobaltworks.zrdback.backup;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -315,7 +316,15 @@ public final class BackupService {
     }
 
     public record Result(int regionsScanned, int chunksChanged, int chunksInserted,
-                         int blobsStored, int entriesPruned, long durationMs) {}
+                         int blobsStored, int entriesPruned, int regionsSkipped,
+                         long durationMs) {}
+
+    /** Per-region backup outcome: skipped = the region kept changing while
+     *  being read (world was being modified) and was left for a later pass. */
+    private record RegionOutcome(int changed, int inserted, boolean skipped) {}
+
+    /** Re-submission rounds for regions that were unstable while being read. */
+    private static final int MAX_BACKUP_WAVES = 4;
 
     /** Runs a full incremental backup across all supported dimensions. */
     public Result runBackup() throws IOException {
@@ -351,18 +360,41 @@ public final class BackupService {
 
         // Region files are independent (own .mca, own .zvcr3d): scan, chunk
         // inflate, extraction, packing, serialization and fsync all parallelize.
+        // Regions that kept changing while being read (world being modified —
+        // e.g. mass chunk generation) are re-submitted in later waves: the
+        // write storm is transient, so a later pass reads them consistently.
         long changed = 0;
         long inserted = 0;
+        int regionsSkipped = 0;
         try (ExecutorService pool = newWorkerPool()) {
-            List<Future<int[]>> futures = new ArrayList<>(tasks.size());
-            for (RegionTask task : tasks) {
-                futures.add(pool.submit(() -> backupRegionFile(task.mapping(), task.mca(),
-                        worldRoot, task.rx(), task.rz(), backupTimestamp)));
-            }
-            for (Future<int[]> future : futures) {
-                int[] counts = await(future, "Backup");
-                changed += counts[0];
-                inserted += counts[1];
+            List<RegionTask> wave = new ArrayList<>(tasks);
+            for (int waveIndex = 0; waveIndex < MAX_BACKUP_WAVES && !wave.isEmpty(); waveIndex++) {
+                if (waveIndex > 0) {
+                    LOGGER.warn("backup wave {}: re-reading {} region(s) that were being "
+                            + "modified during the previous pass", waveIndex + 1, wave.size());
+                    try {
+                        Thread.sleep(2000L * waveIndex);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("backup interrupted", e);
+                    }
+                }
+                List<Future<RegionOutcome>> futures = new ArrayList<>(wave.size());
+                for (RegionTask task : wave) {
+                    futures.add(pool.submit(() -> backupRegionFile(task.mapping(), task.mca(),
+                            worldRoot, task.rx(), task.rz(), backupTimestamp)));
+                }
+                List<RegionTask> stillUnstable = new ArrayList<>();
+                for (int i = 0; i < futures.size(); i++) {
+                    RegionOutcome outcome = await(futures.get(i), "Backup");
+                    changed += outcome.changed();
+                    inserted += outcome.inserted();
+                    if (outcome.skipped()) {
+                        stillUnstable.add(wave.get(i));
+                    }
+                }
+                regionsSkipped = stillUnstable.size();
+                wave = stillUnstable;
             }
         }
 
@@ -373,7 +405,7 @@ public final class BackupService {
             pruned = prune(config.retentionDays()).chunksChanged();
         }
         return new Result(tasks.size(), (int) changed, (int) inserted, blobsStored, pruned,
-                System.currentTimeMillis() - start);
+                regionsSkipped, System.currentTimeMillis() - start);
     }
 
     /**
@@ -448,9 +480,10 @@ public final class BackupService {
 
     /**
      * Backs up the files ZVCR does not model semantically into the
-     * content-addressed blob store: level.dat, players/, data/** (world gen
-     * settings, scoreboard, game rules, weather, ...), and per-dimension
-     * entities/, poi/ and data/** (raids, world border, dragon fight, ...).
+     * content-addressed blob store: level.dat, playerdata/ (modern) and
+     * players/ (legacy), data/** (world gen settings, scoreboard, game rules,
+     * ...), and per-dimension entities/, poi/ and data/** (raids, world
+     * border, dragon fight, ...).
      *
      * @return number of files with new content
      */
@@ -459,6 +492,7 @@ public final class BackupService {
         int stored = 0;
         stored += storeOrCount(store, worldRoot, "level.dat", timestamp);
         stored += storeOrCount(store, worldRoot, "level.dat_old", timestamp);
+        stored += walkAndStore(store, worldRoot, worldRoot.resolve("playerdata"), timestamp);
         stored += walkAndStore(store, worldRoot, worldRoot.resolve("players"), timestamp);
         stored += walkAndStore(store, worldRoot, worldRoot.resolve("data"), timestamp);
         stored += walkAndStore(store, worldRoot, worldRoot.resolve("datapacks"), timestamp);
@@ -473,9 +507,48 @@ public final class BackupService {
         return stored;
     }
 
+    /**
+     * Reads a file the server may be writing concurrently. Two identical
+     * consecutive reads are required before the content is trusted; a file
+     * that keeps changing returns null and is skipped for this backup round
+     * (the next one picks it up).
+     */
+    private static byte[] readStableBytes(Path file) {
+        try {
+            byte[] previous = Files.readAllBytes(file);
+            for (int attempt = 0; attempt < 3; attempt++) {
+                byte[] current = Files.readAllBytes(file);
+                if (java.util.Arrays.equals(previous, current)) {
+                    return previous;
+                }
+                previous = current;
+                Thread.sleep(50L * (attempt + 1));
+            }
+        } catch (NoSuchFileException e) {
+            // file vanished mid-walk — skip
+            return null;
+        } catch (IOException e) {
+            LOGGER.warn("could not read {} stably: {} — skipped", file, e.toString());
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+        LOGGER.warn("{} kept changing while being read — skipped this backup round", file);
+        return null;
+    }
+
     private static int storeOrCount(FileBlobStore store, Path worldRoot,
                                     String relativePath, long timestamp) throws IOException {
-        return store.store(worldRoot, relativePath, timestamp) ? 1 : 0;
+        Path file = worldRoot.resolve(relativePath);
+        if (!Files.isRegularFile(file)) {
+            return 0;
+        }
+        byte[] content = readStableBytes(file);
+        if (content == null) {
+            return 0;
+        }
+        return store.storeContent(worldRoot, relativePath, content, timestamp) ? 1 : 0;
     }
 
     private static int walkAndStore(FileBlobStore store, Path worldRoot,
@@ -487,7 +560,11 @@ public final class BackupService {
         try (Stream<Path> files = Files.walk(directory)) {
             for (Path file : files.filter(Files::isRegularFile).toList()) {
                 String relative = worldRoot.relativize(file).toString().replace('\\', '/');
-                if (store.store(worldRoot, relative, timestamp)) {
+                byte[] content = readStableBytes(file);
+                if (content == null) {
+                    continue;
+                }
+                if (store.storeContent(worldRoot, relative, content, timestamp)) {
                     stored++;
                 }
             }
@@ -524,7 +601,7 @@ public final class BackupService {
             }
         }
         pruned += FileBlobStore.open(config.outputDirectory()).prune(cutoff);
-        return new Result(files.size(), (int) pruned, 0, 0, 0,
+        return new Result(files.size(), (int) pruned, 0, 0, 0, 0,
                 System.currentTimeMillis() - start);
     }
 
@@ -550,13 +627,22 @@ public final class BackupService {
         return removed;
     }
 
-    private int[] backupRegionFile(DimensionMapping mapping, Path mca, Path worldRoot,
-                                   int rx, int rz, long backupTimestamp) throws IOException {
-        Map<Long, RegionScanner.ScannedChunk> present = RegionScanner.scan(mca);
-        if (present.isEmpty()) {
-            return new int[] {0, 0};
-        }
-
+    /**
+     * Backs up one region file. The server writes region files concurrently
+     * with this scan, and a rewrite moves the chunk to new sectors while the
+     * freed sectors get recycled by other chunks — reading through a header
+     * cached before such a rewrite yields ANOTHER chunk's payload (valid NBT,
+     * wrong position), which would corrupt the store with swapped chunks.
+     *
+     * <p>Every chunk save touches the region header (timestamp and/or
+     * offset), so the read is wrapped in optimistic concurrency: snapshot the
+     * header, buffer the extracted chunks, and only insert them if the header
+     * and file length are unchanged after the read window. Otherwise discard
+     * and retry; a region that never stabilizes is skipped for this round and
+     * picked up by the next backup.
+     */
+    private RegionOutcome backupRegionFile(DimensionMapping mapping, Path mca, Path worldRoot,
+                                           int rx, int rz, long backupTimestamp) throws IOException {
         RegionLocation location = new RegionLocation(rx, rz, mapping.dimension);
         Path backupPath = location.filePath(config.outputDirectory());
         ZvcrFile zvcr;
@@ -566,48 +652,96 @@ public final class BackupService {
             zvcr = new ZvcrFile(BackupConfig.PROTOCOL_VERSION, mapping.dimension);
         }
 
-        // Gate: chunk changed iff its header timestamp is newer than the newest
-        // chain-head timestamp across its section chains (0 if no segment yet).
-        List<RegionScanner.ScannedChunk> changedChunks = new ArrayList<>();
-        for (RegionScanner.ScannedChunk chunk : present.values()) {
-            long headTs = headTimestamp(zvcr, chunk.localX(), chunk.localZ());
-            if (headTs == 0 || chunk.headerTimestamp() > headTs) {
-                changedChunks.add(chunk);
-            }
-        }
-        if (changedChunks.isEmpty()) {
-            return new int[] {0, 0};
-        }
-
         ChunkExtractor extractor = new ChunkExtractor(
                 server.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.BIOME));
-        int inserted = 0;
-        try (ChunkReader reader = ChunkReader.open(mca, worldRoot.getFileName().toString(), mapping.levelKey)) {
-            for (RegionScanner.ScannedChunk chunk : changedChunks) {
-                CompoundTag chunkNbt = reader.readChunk(chunk.localX(), chunk.localZ());
-                if (chunkNbt == null) {
-                    continue; // vanished between scan and read
+
+        for (int attempt = 1; attempt <= MAX_REGION_READ_ATTEMPTS; attempt++) {
+            Map<Long, RegionScanner.ScannedChunk> snapshot = RegionScanner.scan(mca);
+            if (snapshot.isEmpty()) {
+                return new RegionOutcome(0, 0, false);
+            }
+            long lengthAtScan = Files.size(mca);
+
+            // Gate: chunk changed iff its header timestamp is newer than the
+            // newest chain-head timestamp across its section chains (0 if no
+            // segment yet).
+            List<RegionScanner.ScannedChunk> changedChunks = new ArrayList<>();
+            for (RegionScanner.ScannedChunk chunk : snapshot.values()) {
+                long headTs = headTimestamp(zvcr, chunk.localX(), chunk.localZ());
+                if (headTs == 0 || chunk.headerTimestamp() > headTs) {
+                    changedChunks.add(chunk);
                 }
-                String status = chunkNbt.contains("Status")
-                        ? chunkNbt.getStringOr("Status", "") : "";
-                int namespaceSep = status.indexOf(':');
-                if (namespaceSep >= 0) {
-                    status = status.substring(namespaceSep + 1);
+            }
+            if (changedChunks.isEmpty()) {
+                return new RegionOutcome(0, 0, false);
+            }
+
+            // Read phase — results are buffered; nothing reaches the store
+            // until the region proves stable below.
+            record PendingChunk(int localX, int localZ, ChunkExtractor.ExtractedChunk extracted) {}
+            List<PendingChunk> pending = new ArrayList<>();
+            try (ChunkReader reader = ChunkReader.open(mca, worldRoot.getFileName().toString(), mapping.levelKey)) {
+                for (RegionScanner.ScannedChunk chunk : changedChunks) {
+                    CompoundTag chunkNbt = reader.readChunk(chunk.localX(), chunk.localZ());
+                    if (chunkNbt == null) {
+                        continue; // read anomaly (mid-write) — vanilla logged it
+                    }
+                    // Recycled-sector guard: the payload must belong to the
+                    // position it was read from.
+                    int expectedX = rx * 32 + chunk.localX();
+                    int expectedZ = rz * 32 + chunk.localZ();
+                    if (chunkNbt.getIntOr("xPos", expectedX) != expectedX
+                            || chunkNbt.getIntOr("zPos", expectedZ) != expectedZ) {
+                        LOGGER.warn("r.{}:{} chunk [{},{}] read while the server was rewriting it "
+                                + "(xPos/zPos mismatch) — skipped", rx, rz, chunk.localX(), chunk.localZ());
+                        continue;
+                    }
+                    String status = chunkNbt.contains("Status")
+                            ? chunkNbt.getStringOr("Status", "") : "";
+                    int namespaceSep = status.indexOf(':');
+                    if (namespaceSep >= 0) {
+                        status = status.substring(namespaceSep + 1);
+                    }
+                    if (!status.equals("full")) {
+                        if (DEBUG) LOGGER.info("chunk {}.{} skipped: status={}", chunk.localX(), chunk.localZ(), status);
+                        continue; // not a fully generated chunk (matches the C++ import)
+                    }
+                    pending.add(new PendingChunk(chunk.localX(), chunk.localZ(),
+                            extractor.extract(chunkNbt, mapping.dimension)));
                 }
-                if (!status.equals("full")) {
-                    if (DEBUG) LOGGER.info("chunk {}.{} skipped: status={}", chunk.localX(), chunk.localZ(), status);
-                    continue; // not a fully generated chunk (matches the C++ import)
+            }
+
+            // Stability check: any chunk save in the read window touches the
+            // header (timestamp and/or offset), so equality here proves the
+            // payloads above were read consistently.
+            Map<Long, RegionScanner.ScannedChunk> after = RegionScanner.scan(mca);
+            long lengthAfter = Files.size(mca);
+            if (after.equals(snapshot) && lengthAfter == lengthAtScan) {
+                int inserted = 0;
+                for (PendingChunk p : pending) {
+                    if (insertChunk(zvcr, p.localX(), p.localZ(), p.extracted(), backupTimestamp)) {
+                        inserted++;
+                    }
                 }
-                if (insertChunk(zvcr, chunk.localX(), chunk.localZ(), extractor.extract(chunkNbt, mapping.dimension),
-                        backupTimestamp)) {
-                    inserted++;
+                if (inserted > 0 || !Files.exists(backupPath)) {
+                    ZvcrFiles.atomicWrite(backupPath, ZvcrWriter.serialize(zvcr));
+                }
+                return new RegionOutcome(changedChunks.size(), inserted, false);
+            }
+            if (attempt < MAX_REGION_READ_ATTEMPTS) {
+                LOGGER.warn("r.{}:{} changed while being read (attempt {}/{}) — retrying",
+                        rx, rz, attempt, MAX_REGION_READ_ATTEMPTS);
+                try {
+                    Thread.sleep(100L * attempt);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("region read interrupted", e);
                 }
             }
         }
-        if (inserted > 0 || !Files.exists(backupPath)) {
-            ZvcrFiles.atomicWrite(backupPath, ZvcrWriter.serialize(zvcr));
-        }
-        return new int[] {changedChunks.size(), inserted};
+        LOGGER.warn("r.{}:{} kept changing while being read — skipped this backup round; "
+                + "the next backup will pick it up", rx, rz);
+        return new RegionOutcome(0, 0, true);
     }
 
     private boolean insertChunk(ZvcrFile zvcr, int localX, int localZ,
@@ -697,6 +831,8 @@ public final class BackupService {
     }
 
     private static final boolean DEBUG = false;
+    /** Retries for the concurrent-write stability check in backupRegionFile. */
+    private static final int MAX_REGION_READ_ATTEMPTS = 6;
 
     private static long headTimestamp(ZvcrFile zvcr, int localX, int localZ) {
         Segment segment = zvcr.region.get(localX, localZ).orElse(null);

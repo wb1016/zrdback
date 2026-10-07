@@ -80,6 +80,10 @@ public final class WorldRestorer {
     private final MinecraftServer server;
     private final PalettedContainerFactory containerFactory;
     private final Registry<Biome> biomes;
+    // Walk statistics for the current restore (single-threaded per instance).
+    private long chainOldest = Long.MAX_VALUE;
+    private int chunksWritten;
+    private int chunksSkipped;
 
     public WorldRestorer(BackupConfig config, MinecraftServer server) {
         this.config = config;
@@ -88,14 +92,34 @@ public final class WorldRestorer {
         this.biomes = server.registryAccess().lookupOrThrow(Registries.BIOME);
     }
 
-    public record Result(int chunksRestored, int filesRestored, Path targetDir, long durationMs) {}
+    public record Result(int chunksRestored, int chunksSkipped, int filesRestored,
+                         Path targetDir, long durationMs) {}
 
     /**
      * Restores the world as of {@code timestamp} into
      * {@code <output>/restore/<timestamp>/}.
+     *
+     * <p>Fails with the recorded history range when {@code timestamp} predates
+     * every stored state: chains clamp to their oldest entry while the blob
+     * store returns nothing, so an out-of-range timestamp would otherwise
+     * silently produce old terrain without level.dat/playerdata — a world that
+     * vanilla re-seeds on first open.
      */
     public Result restore(long timestamp) throws IOException {
         long start = System.currentTimeMillis();
+        FileBlobStore blobs = FileBlobStore.open(config.outputDirectory());
+        long blobOldest = blobs.oldestTimestamp();
+        if (blobOldest != Long.MAX_VALUE && timestamp < blobOldest) {
+            throw new IOException("No backup data exists at or before " + timestamp
+                    + " (oldest recorded state: " + blobOldest
+                    + ", newest: " + blobs.newestTimestamp()
+                    + "). Use /zrdback list to see available backups, or /zrdback restore latest.");
+        }
+
+        chainOldest = Long.MAX_VALUE;
+        chunksWritten = 0;
+        chunksSkipped = 0;
+
         Path targetRoot = config.outputDirectory().resolve("restore").resolve(Long.toString(timestamp));
         if (Files.isDirectory(targetRoot)) {
             // A previous restore to the same timestamp may have left files the
@@ -105,9 +129,28 @@ public final class WorldRestorer {
         }
         Files.createDirectories(targetRoot);
 
-        int chunks = restoreRegions(timestamp, targetRoot);
-        int files = FileBlobStore.open(config.outputDirectory()).restore(timestamp, targetRoot);
-        return new Result(chunks, files, targetRoot, System.currentTimeMillis() - start);
+        try {
+            restoreRegions(timestamp, targetRoot);
+            int files = blobs.restore(timestamp, targetRoot);
+
+            if (timestamp < chainOldest) {
+                throw new IOException(chainOldest == Long.MAX_VALUE
+                        ? "The backup store contains no chunk data to restore."
+                        : "No backup data exists at or before " + timestamp
+                                + " (oldest recorded chunk state: " + chainOldest
+                                + "). Use /zrdback list to see available backups, or /zrdback restore latest.");
+            }
+            if (chunksWritten == 0 && files == 0) {
+                throw new IOException("The last backup captured no chunk data — the world was "
+                        + "being heavily modified while it ran (e.g. mass chunk generation). "
+                        + "Run /zrdback now again once chunk generation has settled, then restore.");
+            }
+            return new Result(chunksWritten, chunksSkipped, files, targetRoot,
+                    System.currentTimeMillis() - start);
+        } catch (IOException e) {
+            deleteRecursively(targetRoot);
+            throw e;
+        }
     }
 
     private static void deleteRecursively(Path root) throws IOException {
@@ -163,6 +206,15 @@ public final class WorldRestorer {
                 if (segment == null) {
                     continue;
                 }
+                long segmentOldest = segmentOldestTimestamp(segment);
+                chainOldest = Math.min(chainOldest, segmentOldest);
+                if (segmentOldest > timestamp) {
+                    // The segment had no state at or before the requested
+                    // timestamp (created later); writing it would inject a
+                    // chunk that did not exist at that time.
+                    chunksSkipped++;
+                    continue;
+                }
                 int localX = i / Zvcr.REGION_SIDELENGTH_SEGMENTS;
                 int localZ = i % Zvcr.REGION_SIDELENGTH_SEGMENTS;
                 CompoundTag chunk = buildChunkNbt(zvcr, segment, localX, localZ, rx, rz,
@@ -172,9 +224,33 @@ public final class WorldRestorer {
                     NbtIo.write(chunk, out);
                 }
                 restored++;
+                chunksWritten++;
             }
         }
         return restored;
+    }
+
+    /**
+     * Oldest recorded state timestamp of a segment: the tail entry of its
+     * block/biome chains and TE history (chains are stored newest-first).
+     * MAX_VALUE when the segment has no history.
+     */
+    private static long segmentOldestTimestamp(Segment segment) {
+        long oldest = Long.MAX_VALUE;
+        for (int s = 0; s < segment.sectionCount; s++) {
+            oldest = Math.min(oldest, chainOldestTimestamp(segment.blockSections.section(s)));
+            oldest = Math.min(oldest, chainOldestTimestamp(segment.biomeSections.section(s)));
+        }
+        var teDeltas = segment.tileEntities.reverseDeltas();
+        if (!teDeltas.isEmpty()) {
+            oldest = Math.min(oldest, teDeltas.get(teDeltas.size() - 1).timestamp());
+        }
+        return oldest;
+    }
+
+    private static long chainOldestTimestamp(PackedDeltaData chain) {
+        var deltas = chain.reverseDeltas();
+        return deltas.isEmpty() ? Long.MAX_VALUE : deltas.get(deltas.size() - 1).timestamp();
     }
 
     private CompoundTag buildChunkNbt(ZvcrFile zvcr, Segment segment, int localX, int localZ,

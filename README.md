@@ -122,17 +122,21 @@ and the parent directory is fsynced. A crash mid-backup never corrupts the previ
 `<output>/restore/<timestamp>/`; never into the live world. Restoring the same
 timestamp again replaces the previous output.
 
+The timestamp must fall within the recorded history (oldest...newest backup
+state); older timestamps fail with the valid range instead of producing a
+partial world. Chunks first recorded after the target timestamp are skipped,
+vanilla regenerates them from the seed.
+
 - Region files are rebuilt from the chains at the target timestamp (vanilla
   `PalettedContainer`s, written through vanilla `RegionFile`).
 - Tile entities are rebuilt from the stored canonical NBT.
 - Auxiliary files come from the blob store at the same timestamp.
-- Restored chunks carry the current `DataVersion` and `isLightOn=false`; vanilla recomputes
-  light and heightmaps on load.
+- Restored chunks carry the current `DataVersion` and `isLightOn=false`;
+  vanilla recomputes light and heightmaps on load.
 - Only fully generated chunks are backed up (ZVCR-3D stores chunk semantics).
-  Proto-chunks (structure starts, terrain in progress) are not covered — the
-  restored world regenerates them on first load, which vanilla reproduces
-  deterministically from the world seed. Worldgen-modifying mods may change
-  that.
+  Proto-chunks (structure starts, terrain in progress) are not covered.
+  The restored world regenerates them on first load, which vanilla reproduces
+  deterministically from the world seed. Worldgen-modifying mods may change that.
 
 To use a restore: stop the server, delete the target world folder, then copy
 the restore directory's contents into its place, start the server. Never copy
@@ -156,7 +160,7 @@ Configuration lives under `config/zrdback.properties`
 
 In singleplayer the world save's parent is the shared `saves/` directory of the
 whole instance, so the store root is always scoped per save
-(`<output-directory or default>/<world-name>/`) — backups, prune, retention and
+(`<output-directory or default>/<world-name>/`) - backups, prune, retention and
 restore only ever touch the current save. Dedicated servers host one world per
 process and keep the flat layout.
 

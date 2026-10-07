@@ -183,23 +183,34 @@ public final class ChunkExtractor {
                     + paletteSize + ")");
         }
         long[] data = container.getLongArray("data").orElseThrow();
-        boolean global = bits > (blocks ? 8 : 3);
 
-        int[] ids = null;
-        if (!global) {
-            ids = new int[paletteSize];
-            for (int i = 0; i < paletteSize; i++) {
-                ids[i] = paletteValueToId(palette, i, blocks);
-            }
+        // Disc data values are ALWAYS indices into the palette list — including
+        // sections vanilla stores with the Global in-memory configuration
+        // (>8-bit blocks / >3-bit biomes): PalettedContainer#pack re-encodes
+        // into a fresh HashMapPalette and writes every distinct entry, so the
+        // palette must be resolved for every multi-value section. Treating
+        // large-bit sections as "global IDs" stored raw palette indices, which
+        // restored as arbitrary wrong blocks.
+        int[] ids = new int[paletteSize];
+        for (int i = 0; i < paletteSize; i++) {
+            ids[i] = paletteValueToId(palette, i, blocks);
         }
 
         int[] out = new int[expectedSize];
         int valuesPerLong = 64 / bits;
         long mask = (1L << bits) - 1;
+        if (data.length < (expectedSize + valuesPerLong - 1) / valuesPerLong) {
+            throw new IllegalStateException("Paletted container data too short: "
+                    + data.length + " longs for " + expectedSize + " entries at " + bits + " bits");
+        }
         for (int i = 0; i < expectedSize; i++) {
             long cell = data[i / valuesPerLong];
             int raw = (int) ((cell >>> ((i % valuesPerLong) * bits)) & mask);
-            out[i] = global ? raw : ids[raw];
+            if (raw >= paletteSize) {
+                throw new IllegalStateException("Palette index out of bounds: " + raw
+                        + " >= " + paletteSize + " (bits " + bits + ")");
+            }
+            out[i] = ids[raw];
         }
         return out;
     }

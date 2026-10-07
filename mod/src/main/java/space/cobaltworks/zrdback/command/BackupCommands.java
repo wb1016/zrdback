@@ -20,6 +20,7 @@
  */
 package space.cobaltworks.zrdback.command;
 
+import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -31,6 +32,7 @@ import net.minecraft.server.MinecraftServer;
 import java.nio.file.Path;
 
 import space.cobaltworks.zrdback.backup.BackupService;
+import space.cobaltworks.zrdback.backup.WorldRestorer;
 
 /**
  * {@code /backup now | prune <days> | status} — moderator level required.
@@ -74,6 +76,10 @@ public final class BackupCommands {
                             if (result.entriesPruned() > 0) {
                                 message += "; retention pruned " + result.entriesPruned() + " entries";
                             }
+                            if (result.regionsSkipped() > 0) {
+                                message += "; " + result.regionsSkipped()
+                                        + " region(s) skipped (world was being modified) — run again once chunk generation settles";
+                            }
                             return message;
                         } catch (java.io.IOException e) {
                             throw new RuntimeException(e);
@@ -111,10 +117,8 @@ public final class BackupCommands {
                             enqueue(context.getSource(), "Restore started", () -> {
                                 try {
                                     var result = service.restore(now);
-                                    return "Restore finished: " + result.chunksRestored() + " chunks, "
-                                            + result.filesRestored() + " files -> " + result.targetDir()
-                                            + " (" + result.durationMs() + " ms)";
-                                } catch (java.io.IOException e) {
+                                    return restoreMessage(result);
+                                } catch (IOException e) {
                                     throw new RuntimeException(e);
                                 }
                             });
@@ -130,10 +134,8 @@ public final class BackupCommands {
                                     enqueue(context.getSource(), "Restore started", () -> {
                                         try {
                                             var result = service.restore(ts);
-                                            return "Restore finished: " + result.chunksRestored() + " chunks, "
-                                                    + result.filesRestored() + " files -> " + result.targetDir()
-                                                    + " (" + result.durationMs() + " ms)";
-                                        } catch (java.io.IOException e) {
+                                            return restoreMessage(result);
+                                        } catch (IOException e) {
                                             throw new RuntimeException(e);
                                         }
                                     });
@@ -195,6 +197,17 @@ public final class BackupCommands {
                             service.statusLine()), false);
                     return 1;
                 }));
+    }
+
+    private static String restoreMessage(WorldRestorer.Result result) {
+        String message = "Restore finished: " + result.chunksRestored() + " chunks, "
+                + result.filesRestored() + " files -> " + result.targetDir()
+                + " (" + result.durationMs() + " ms)";
+        if (result.chunksSkipped() > 0) {
+            message += "; " + result.chunksSkipped()
+                    + " chunks had no data at this timestamp and were skipped";
+        }
+        return message;
     }
 
     private static BackupService requireService(CommandSourceStack source,

@@ -107,7 +107,17 @@ public final class FileBlobStore {
         if (!Files.isRegularFile(file)) {
             return false;
         }
-        byte[] content = Files.readAllBytes(file);
+        return storeContent(worldRoot, relativePath, Files.readAllBytes(file), timestamp);
+    }
+
+    /**
+     * Stores already-read content. Callers that race with the server's writes
+     * should pass content verified stable (see BackupService.readStableBytes).
+     *
+     * @return true if a new history entry was recorded
+     */
+    public boolean storeContent(Path worldRoot, String relativePath, byte[] content,
+                                long timestamp) throws IOException {
         String hash = sha256Hex(content);
 
         Path blob = blobsDir.resolve(hash + ".zst");
@@ -211,6 +221,22 @@ public final class FileBlobStore {
             }
         }
         return stamps;
+    }
+
+    /** Oldest/newest recorded state timestamp across all tracked-file
+     *  histories; MAX_VALUE / MIN_VALUE when the index is empty. */
+    public long oldestTimestamp() {
+        return index.files.values().stream()
+                .flatMap(List::stream)
+                .mapToLong(Entry::timestamp)
+                .min().orElse(Long.MAX_VALUE);
+    }
+
+    public long newestTimestamp() {
+        return index.files.values().stream()
+                .flatMap(List::stream)
+                .mapToLong(Entry::timestamp)
+                .max().orElse(Long.MIN_VALUE);
     }
 
     /** Number of distinct blobs on disk. */
