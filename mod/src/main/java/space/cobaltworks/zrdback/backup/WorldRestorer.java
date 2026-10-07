@@ -25,9 +25,13 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.stream.Stream;
 
 import net.minecraft.core.Holder;
@@ -55,14 +59,14 @@ import net.minecraft.world.level.chunk.storage.RegionStorageInfo;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.level.Level;
 
-import space.cobaltworks.zrdback.zvcr.Zvcr;
-import space.cobaltworks.zrdback.zvcr.format.PackedData;
-import space.cobaltworks.zrdback.zvcr.format.PackedDeltaData;
-import space.cobaltworks.zrdback.zvcr.region.Dimension;
-import space.cobaltworks.zrdback.zvcr.region.Segment;
-import space.cobaltworks.zrdback.zvcr.region.TileEntity;
-import space.cobaltworks.zrdback.zvcr.region.TileEntityPosition;
-import space.cobaltworks.zrdback.zvcr.region.ZvcrFile;
+import space.cobaltworks.zvcr.Zvcr;
+import space.cobaltworks.zvcr.format.PackedData;
+import space.cobaltworks.zvcr.format.PackedDeltaData;
+import space.cobaltworks.zvcr.region.Dimension;
+import space.cobaltworks.zvcr.region.Segment;
+import space.cobaltworks.zvcr.region.TileEntity;
+import space.cobaltworks.zvcr.region.TileEntityPosition;
+import space.cobaltworks.zvcr.region.ZvcrFile;
 import space.cobaltworks.zrdback.BackupConfig;
 
 /**
@@ -80,10 +84,6 @@ public final class WorldRestorer {
     private final MinecraftServer server;
     private final PalettedContainerFactory containerFactory;
     private final Registry<Biome> biomes;
-    // Walk statistics for the current restore (single-threaded per instance).
-    private long chainOldest = Long.MAX_VALUE;
-    private int chunksWritten;
-    private int chunksSkipped;
 
     public WorldRestorer(BackupConfig config, MinecraftServer server) {
         this.config = config;
@@ -94,6 +94,9 @@ public final class WorldRestorer {
 
     public record Result(int chunksRestored, int chunksSkipped, int filesRestored,
                          Path targetDir, long durationMs) {}
+
+    /** Per-file restore outcome (region files are restored in parallel). */
+    private record RegionRestore(int restored, int skipped) {}
 
     /**
      * Restores the world as of {@code timestamp} into
@@ -116,9 +119,18 @@ public final class WorldRestorer {
                     + "). Use /zrdback list to see available backups, or /zrdback restore latest.");
         }
 
-        chainOldest = Long.MAX_VALUE;
-        chunksWritten = 0;
-        chunksSkipped = 0;
+        // Fail fast: verify chunk-data coverage BEFORE touching the target
+        // directory. The per-file timestamp sidecars make this O(files); a
+        // missing sidecar costs one parse (and populates the sidecar).
+        long dataOldest = prescanOldestTimestamp();
+        if (dataOldest == Long.MAX_VALUE) {
+            throw new IOException("The backup store contains no chunk data to restore.");
+        }
+        if (timestamp < dataOldest) {
+            throw new IOException("No backup data exists at or before " + timestamp
+                    + " (oldest recorded chunk state: " + dataOldest
+                    + "). Use /zrdback list to see available backups, or /zrdback restore latest.");
+        }
 
         Path targetRoot = config.outputDirectory().resolve("restore").resolve(Long.toString(timestamp));
         if (Files.isDirectory(targetRoot)) {
@@ -130,27 +142,41 @@ public final class WorldRestorer {
         Files.createDirectories(targetRoot);
 
         try {
-            restoreRegions(timestamp, targetRoot);
+            RegionRestore regions = restoreRegions(timestamp, targetRoot);
             int files = blobs.restore(timestamp, targetRoot);
 
-            if (timestamp < chainOldest) {
-                throw new IOException(chainOldest == Long.MAX_VALUE
-                        ? "The backup store contains no chunk data to restore."
-                        : "No backup data exists at or before " + timestamp
-                                + " (oldest recorded chunk state: " + chainOldest
-                                + "). Use /zrdback list to see available backups, or /zrdback restore latest.");
-            }
-            if (chunksWritten == 0 && files == 0) {
+            if (regions.restored() == 0 && files == 0) {
                 throw new IOException("The last backup captured no chunk data — the world was "
                         + "being heavily modified while it ran (e.g. mass chunk generation). "
                         + "Run /zrdback now again once chunk generation has settled, then restore.");
             }
-            return new Result(chunksWritten, chunksSkipped, files, targetRoot,
+            return new Result(regions.restored(), regions.skipped(), files, targetRoot,
                     System.currentTimeMillis() - start);
         } catch (IOException e) {
             deleteRecursively(targetRoot);
             throw e;
         }
+    }
+
+    /**
+     * Oldest recorded chunk timestamp across all {@code .zvcr3d} files — the
+     * same value the restore walk used to compute post-hoc, now checked before
+     * any target-directory work happens.
+     */
+    private long prescanOldestTimestamp() throws IOException {
+        long oldest = Long.MAX_VALUE;
+        for (Dimension dimension : Dimension.values()) {
+            Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
+            if (!Files.isDirectory(dimDir)) {
+                continue;
+            }
+            try (Stream<Path> files = Files.walk(dimDir)) {
+                for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".zvcr3d")).toList()) {
+                    oldest = Math.min(oldest, TimestampSidecar.oldestFor(file));
+                }
+            }
+        }
+        return oldest;
     }
 
     private static void deleteRecursively(Path root) throws IOException {
@@ -161,8 +187,14 @@ public final class WorldRestorer {
         }
     }
 
-    private int restoreRegions(long timestamp, Path targetRoot) throws IOException {
-        int chunks = 0;
+    /**
+     * Restores all region files in parallel on the worker pool (same shape as
+     * backup/prune). All tasks are awaited even when one fails, so cleanup
+     * below never races a still-writing task; the first failure is rethrown.
+     */
+    private RegionRestore restoreRegions(long timestamp, Path targetRoot) throws IOException {
+        record Task(Path file, int rx, int rz, Dimension dimension) {}
+        List<Task> tasks = new ArrayList<>();
         for (Dimension dimension : Dimension.values()) {
             Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
             if (!Files.isDirectory(dimDir)) {
@@ -173,20 +205,46 @@ public final class WorldRestorer {
                     String name = file.getFileName().toString(); // r.{rx}.{rz}.zvcr3d
                     String body = name.substring(2, name.length() - ".zvcr3d".length());
                     int dot = body.indexOf('.');
-                    int rx = Integer.parseInt(body.substring(0, dot));
-                    int rz = Integer.parseInt(body.substring(dot + 1));
-                    chunks += restoreRegionFile(file, rx, rz, dimension, timestamp, targetRoot);
+                    tasks.add(new Task(file, Integer.parseInt(body.substring(0, dot)),
+                            Integer.parseInt(body.substring(dot + 1)), dimension));
                 }
             }
         }
-        return chunks;
+
+        int restored = 0;
+        int skipped = 0;
+        Throwable failure = null;
+        try (ExecutorService pool = BackupService.newWorkerPool(config)) {
+            List<Future<RegionRestore>> futures = new ArrayList<>(tasks.size());
+            for (Task task : tasks) {
+                futures.add(pool.submit(() -> restoreRegionFile(task.file(), task.rx(), task.rz(),
+                        task.dimension(), timestamp, targetRoot)));
+            }
+            for (Future<RegionRestore> future : futures) {
+                try {
+                    RegionRestore result = future.get();
+                    restored += result.restored();
+                    skipped += result.skipped();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    if (failure == null) failure = e;
+                } catch (ExecutionException e) {
+                    if (failure == null) failure = e.getCause();
+                }
+            }
+        }
+        if (failure instanceof IOException io) throw io;
+        if (failure instanceof RuntimeException rt) throw rt;
+        if (failure instanceof Error err) throw err;
+        if (failure != null) throw new IOException(failure);
+        return new RegionRestore(restored, skipped);
     }
 
-    private int restoreRegionFile(Path zvcrPath, int rx, int rz, Dimension dimension,
-                                  long timestamp, Path targetRoot) throws IOException {
-        ZvcrFile zvcr = space.cobaltworks.zrdback.zvcr.io.ZvcrFiles.readFile(zvcrPath);
+    private RegionRestore restoreRegionFile(Path zvcrPath, int rx, int rz, Dimension dimension,
+                                            long timestamp, Path targetRoot) throws IOException {
+        ZvcrFile zvcr = space.cobaltworks.zvcr.io.ZvcrFiles.readFile(zvcrPath);
         if (zvcr.region.presentCount() == 0) {
-            return 0;
+            return new RegionRestore(0, 0);
         }
 
         // Mirror the live layout in the target directory.
@@ -197,6 +255,7 @@ public final class WorldRestorer {
         Path mca = regionDir.resolve("r." + rx + "." + rz + ".mca");
 
         int restored = 0;
+        int skipped = 0;
         try (RegionFile region = new RegionFile(
                 new RegionStorageInfo("zvcr-restore", levelKey, "region"),
                 mca, regionDir, RegionFileVersion.DEFAULT, false)) {
@@ -207,12 +266,11 @@ public final class WorldRestorer {
                     continue;
                 }
                 long segmentOldest = segmentOldestTimestamp(segment);
-                chainOldest = Math.min(chainOldest, segmentOldest);
                 if (segmentOldest > timestamp) {
                     // The segment had no state at or before the requested
                     // timestamp (created later); writing it would inject a
                     // chunk that did not exist at that time.
-                    chunksSkipped++;
+                    skipped++;
                     continue;
                 }
                 int localX = i / Zvcr.REGION_SIDELENGTH_SEGMENTS;
@@ -224,10 +282,9 @@ public final class WorldRestorer {
                     NbtIo.write(chunk, out);
                 }
                 restored++;
-                chunksWritten++;
             }
         }
-        return restored;
+        return new RegionRestore(restored, skipped);
     }
 
     /**

@@ -37,7 +37,7 @@ import java.util.stream.Stream;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
-import space.cobaltworks.zrdback.zvcr.io.ZstdCodec;
+import space.cobaltworks.zvcr.io.ZstdCodec;
 
 /**
  * Content-addressed blob store for files ZVCR does not model semantically

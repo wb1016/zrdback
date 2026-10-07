@@ -41,20 +41,20 @@ xychart-beta
     title "Backup store size (MB) over 20 rounds"
     x-axis [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20]
     y-axis "MB" 0 --> 7000
-    line [40, 79, 119, 161, 197, 237, 277, 314, 354, 392, 428, 469, 507, 547, 581, 622, 658, 696, 728, 768]
-    line [127, 323, 503, 799, 976, 1262, 1655, 1859, 2169, 2586, 3098, 3350, 3699, 4157, 4711, 4926, 5233, 5636, 6129, 6733]
+    line [43, 84, 128, 175, 216, 260, 303, 345, 390, 435, 476, 526, 571, 618, 660, 710, 754, 800, 838, 884]
+    line [119, 301, 471, 754, 928, 1206, 1584, 1777, 2073, 2476, 2972, 3223, 3574, 4036, 4597, 4816, 5130, 5541, 6041, 6652]
 ```
 
 | | ZRDBack | FastBack |
 |---|---|---|
-| incremental backup time | 5.5-10.7 s, flat in world size | 2-10 s per round |
-| store size @ 10k chunks | 39.7 MB (3.2x smaller) | 126.9 MB  |
-| store size @ 200k chunks | 768 MB (8.8x smaller) | 6.73 GB  |
-| growth per ~10k-chunk backup | ~36-40 MB | ~330-470 MB |
+| incremental backup time | 6.1-9.9 s, flat in world size | 5-6 s per round |
+| store size @ 10k chunks | 43.0 MB (2.8x smaller) | 119.3 MB  |
+| store size @ 200k chunks | 884 MB (7.5x smaller) | 6.65 GB  |
+| growth per ~10k-chunk backup | ~38-50 MB | ~170-610 MB |
 
 The size gap widens as history accumulates: git re-blobs every modified region file whole
 (~1024 chunks worth per touched file), while ZRDBack stores per-chunk reverse deltas.
-At 200k chunks, 20 restore points cost 0.37x the live world size with ZRDBack vs 3.2x with git.
+At 200k chunks, 20 restore points cost 0.43x the live world size with ZRDBack vs 3.2x with git.
 
 Backup work runs on a fixed worker pool (default half the cores) at
 minimum thread priority (nice 19 on Linux), so backups soak up idle CPU and server ticks are always served first;
@@ -94,7 +94,9 @@ and inserts them into the chunk's reverse-delta chain in its `.zvcr3d` file:
   snapshot, bounding reconstruction cost to O(checkpoint interval).
 
 Everything is palette-packed (4/8/16-bit entries, LSB-first in `uint64` cells)
-and the whole region container is compressed with Zstd level 8 (with frame checksum).
+and the whole region container is compressed with Zstd (level 4 for incremental
+backups - roughly 4x cheaper for ~1% larger files - level 8 for prune rewrites;
+frame checksum always on).
 Palettes are built in canonical (ascending) order so identical section content deduplicates
 in the palette table.
 

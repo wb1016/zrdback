@@ -37,6 +37,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Stream;
 
 import net.minecraft.nbt.CompoundTag;
@@ -45,20 +46,18 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
 
-import space.cobaltworks.zrdback.zvcr.Zvcr;
-import space.cobaltworks.zrdback.zvcr.format.DeltaInsertionResult;
-import space.cobaltworks.zrdback.zvcr.format.PackedData;
-import space.cobaltworks.zrdback.zvcr.format.PackedDeltaData;
-import space.cobaltworks.zrdback.zvcr.format.PackedSnapshot;
-import space.cobaltworks.zrdback.zvcr.io.ZvcrFiles;
-import space.cobaltworks.zrdback.zvcr.io.ZvcrReader;
-import space.cobaltworks.zrdback.zvcr.io.ZvcrWriter;
-import space.cobaltworks.zrdback.zvcr.region.Dimension;
-import space.cobaltworks.zrdback.zvcr.region.RegionLocation;
-import space.cobaltworks.zrdback.zvcr.region.Segment;
-import space.cobaltworks.zrdback.zvcr.region.SegmentState;
-import space.cobaltworks.zrdback.zvcr.region.TileEntityListDelta;
-import space.cobaltworks.zrdback.zvcr.region.ZvcrFile;
+import space.cobaltworks.zvcr.Zvcr;
+import space.cobaltworks.zvcr.format.DeltaInsertionResult;
+import space.cobaltworks.zvcr.format.PackedData;
+import space.cobaltworks.zvcr.format.PackedDeltaData;
+import space.cobaltworks.zvcr.format.PackedSnapshot;
+import space.cobaltworks.zvcr.io.ZstdCodec;
+import space.cobaltworks.zvcr.io.ZvcrFiles;
+import space.cobaltworks.zvcr.io.ZvcrWriter;
+import space.cobaltworks.zvcr.region.Dimension;
+import space.cobaltworks.zvcr.region.RegionLocation;
+import space.cobaltworks.zvcr.region.Segment;
+import space.cobaltworks.zvcr.region.ZvcrFile;
 import space.cobaltworks.zrdback.BackupConfig;
 
 /**
@@ -80,10 +79,27 @@ public final class BackupService {
 
     private final BackupConfig config;
     private final MinecraftServer server;
+    /** Long-lived worker pool shared by backup, prune, list and restore. */
+    private final ExecutorService workerPool;
+    /** Serializes store mutations: a backup and a prune never interleave. */
+    private final ReentrantLock mutationLock = new ReentrantLock();
 
     public BackupService(BackupConfig config, MinecraftServer server) {
         this.config = config;
         this.server = server;
+        this.workerPool = newWorkerPool(config);
+    }
+
+    /** Shuts the shared worker pool down, interrupting a running task. */
+    public void shutdown() {
+        workerPool.shutdownNow();
+    }
+
+    /** Thrown when a backup or prune is already running (single-flight guard). */
+    public static final class StoreBusyException extends IOException {
+        public StoreBusyException(String message) {
+            super(message);
+        }
     }
 
     public Path outputDirectory() {
@@ -120,7 +136,7 @@ public final class BackupService {
         int minChain = Integer.MAX_VALUE;
         int maxChain = 0;
         long teDeltas = 0;
-        java.util.Set<space.cobaltworks.zrdback.zvcr.format.Palette> distinctPalettes = new java.util.HashSet<>();
+        java.util.Set<space.cobaltworks.zvcr.format.Palette> distinctPalettes = new java.util.HashSet<>();
         long paletteRefs = 0;
 
         for (Dimension dimension : Dimension.values()) {
@@ -259,14 +275,12 @@ public final class BackupService {
         }
 
         TreeSet<Long> stamps = new TreeSet<>();
-        try (ExecutorService pool = newWorkerPool()) {
-            List<Future<TreeSet<Long>>> futures = new ArrayList<>(files.size());
-            for (Path file : files) {
-                futures.add(pool.submit(() -> fileTimestamps(file)));
-            }
-            for (Future<TreeSet<Long>> future : futures) {
-                stamps.addAll(await(future, "List"));
-            }
+        List<Future<TreeSet<Long>>> futures = new ArrayList<>(files.size());
+        for (Path file : files) {
+            futures.add(workerPool.submit(() -> fileTimestamps(file)));
+        }
+        for (Future<TreeSet<Long>> future : futures) {
+            stamps.addAll(await(future, "List"));
         }
         stamps.addAll(FileBlobStore.open(config.outputDirectory()).timestamps());
         return stamps;
@@ -274,30 +288,7 @@ public final class BackupService {
 
     /** Distinct timestamps of one {@code .zvcr3d} file's chains. */
     private static TreeSet<Long> fileTimestamps(Path file) throws IOException {
-        ZvcrFile zvcr = ZvcrFiles.readFile(file);
-        TreeSet<Long> stamps = new TreeSet<>();
-        for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
-            Segment segment = zvcr.region.get(i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
-                    i % Zvcr.REGION_SIDELENGTH_SEGMENTS).orElse(null);
-            if (segment == null) {
-                continue;
-            }
-            for (SegmentState state : segment.info.segmentStates()) {
-                stamps.add(state.timestamp());
-            }
-            for (TileEntityListDelta delta : segment.tileEntities.reverseDeltas()) {
-                stamps.add(delta.timestamp());
-            }
-            for (int s = 0; s < segment.sectionCount; s++) {
-                for (PackedDeltaData chain : new PackedDeltaData[] {
-                        segment.blockSections.section(s), segment.biomeSections.section(s)}) {
-                    for (PackedSnapshot snapshot : chain.reverseDeltas()) {
-                        stamps.add(snapshot.timestamp());
-                    }
-                }
-            }
-        }
-        return stamps;
+        return TimestampSidecar.timestampsFor(file);
     }
 
     public String statusLine() {
@@ -328,6 +319,19 @@ public final class BackupService {
 
     /** Runs a full incremental backup across all supported dimensions. */
     public Result runBackup() throws IOException {
+        // Single-flight: the scheduler and /zrdback now must never interleave
+        // (two concurrent runs would double-insert and race file rewrites).
+        if (!mutationLock.tryLock()) {
+            throw new StoreBusyException("Another backup or prune is already running");
+        }
+        try {
+            return runBackupLocked();
+        } finally {
+            mutationLock.unlock();
+        }
+    }
+
+    private Result runBackupLocked() throws IOException {
         long start = System.currentTimeMillis();
         flushWorldSave();
         Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
@@ -366,36 +370,34 @@ public final class BackupService {
         long changed = 0;
         long inserted = 0;
         int regionsSkipped = 0;
-        try (ExecutorService pool = newWorkerPool()) {
-            List<RegionTask> wave = new ArrayList<>(tasks);
-            for (int waveIndex = 0; waveIndex < MAX_BACKUP_WAVES && !wave.isEmpty(); waveIndex++) {
-                if (waveIndex > 0) {
-                    LOGGER.warn("backup wave {}: re-reading {} region(s) that were being "
-                            + "modified during the previous pass", waveIndex + 1, wave.size());
-                    try {
-                        Thread.sleep(2000L * waveIndex);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new IOException("backup interrupted", e);
-                    }
+        List<RegionTask> wave = new ArrayList<>(tasks);
+        for (int waveIndex = 0; waveIndex < MAX_BACKUP_WAVES && !wave.isEmpty(); waveIndex++) {
+            if (waveIndex > 0) {
+                LOGGER.warn("backup wave {}: re-reading {} region(s) that were being "
+                        + "modified during the previous pass", waveIndex + 1, wave.size());
+                try {
+                    Thread.sleep(2000L * waveIndex);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("backup interrupted", e);
                 }
-                List<Future<RegionOutcome>> futures = new ArrayList<>(wave.size());
-                for (RegionTask task : wave) {
-                    futures.add(pool.submit(() -> backupRegionFile(task.mapping(), task.mca(),
-                            worldRoot, task.rx(), task.rz(), backupTimestamp)));
-                }
-                List<RegionTask> stillUnstable = new ArrayList<>();
-                for (int i = 0; i < futures.size(); i++) {
-                    RegionOutcome outcome = await(futures.get(i), "Backup");
-                    changed += outcome.changed();
-                    inserted += outcome.inserted();
-                    if (outcome.skipped()) {
-                        stillUnstable.add(wave.get(i));
-                    }
-                }
-                regionsSkipped = stillUnstable.size();
-                wave = stillUnstable;
             }
+            List<Future<RegionOutcome>> futures = new ArrayList<>(wave.size());
+            for (RegionTask task : wave) {
+                futures.add(workerPool.submit(() -> backupRegionFile(task.mapping(), task.mca(),
+                        worldRoot, task.rx(), task.rz(), backupTimestamp)));
+            }
+            List<RegionTask> stillUnstable = new ArrayList<>();
+            for (int i = 0; i < futures.size(); i++) {
+                RegionOutcome outcome = await(futures.get(i), "Backup");
+                changed += outcome.changed();
+                inserted += outcome.inserted();
+                if (outcome.skipped()) {
+                    stillUnstable.add(wave.get(i));
+                }
+            }
+            regionsSkipped = stillUnstable.size();
+            wave = stillUnstable;
         }
 
         int blobsStored = backupAuxiliaryFiles(worldRoot, backupTimestamp);
@@ -443,7 +445,7 @@ public final class BackupService {
         }
     }
 
-    private ExecutorService newWorkerPool() {
+    static ExecutorService newWorkerPool(BackupConfig config) {
         // Auto = half the cores: on SMT CPUs that matches the physical core
         // count (the sweet spot for zlib/zstd work) and leaves logical siblings
         // for the server/render/GC threads.
@@ -574,6 +576,19 @@ public final class BackupService {
 
     /** Prunes chain entries and blob history older than {@code retentionDays}. */
     public Result prune(int retentionDays) throws IOException {
+        // Same single-flight guard as runBackup: both rewrite .zvcr3d files,
+        // and interleaved read-modify-write passes would lose updates.
+        if (!mutationLock.tryLock()) {
+            throw new StoreBusyException("Another backup or prune is already running");
+        }
+        try {
+            return pruneLocked(retentionDays);
+        } finally {
+            mutationLock.unlock();
+        }
+    }
+
+    private Result pruneLocked(int retentionDays) throws IOException {
         long start = System.currentTimeMillis();
         long cutoff = Instant.now().getEpochSecond() - retentionDays * 86400L;
 
@@ -591,14 +606,12 @@ public final class BackupService {
         }
 
         long pruned = 0;
-        try (ExecutorService pool = newWorkerPool()) {
-            List<Future<Integer>> futures = new ArrayList<>(files.size());
-            for (Path file : files) {
-                futures.add(pool.submit(() -> pruneFile(file, cutoff)));
-            }
-            for (Future<Integer> future : futures) {
-                pruned += await(future, "Prune");
-            }
+        List<Future<Integer>> futures = new ArrayList<>(files.size());
+        for (Path file : files) {
+            futures.add(workerPool.submit(() -> pruneFile(file, cutoff)));
+        }
+        for (Future<Integer> future : futures) {
+            pruned += await(future, "Prune");
         }
         pruned += FileBlobStore.open(config.outputDirectory()).prune(cutoff);
         return new Result(files.size(), (int) pruned, 0, 0, 0, 0,
@@ -623,6 +636,7 @@ public final class BackupService {
         }
         if (removed > 0) {
             ZvcrFiles.atomicWrite(file, ZvcrWriter.serialize(zvcr));
+            TimestampSidecar.write(file, TimestampSidecar.collect(zvcr));
         }
         return removed;
     }
@@ -661,6 +675,7 @@ public final class BackupService {
                 return new RegionOutcome(0, 0, false);
             }
             long lengthAtScan = Files.size(mca);
+            java.nio.file.attribute.FileTime mtimeAtScan = Files.getLastModifiedTime(mca);
 
             // Gate: chunk changed iff its header timestamp is newer than the
             // newest chain-head timestamp across its section chains (0 if no
@@ -712,11 +727,22 @@ public final class BackupService {
             }
 
             // Stability check: any chunk save in the read window touches the
-            // header (timestamp and/or offset), so equality here proves the
-            // payloads above were read consistently.
-            Map<Long, RegionScanner.ScannedChunk> after = RegionScanner.scan(mca);
+            // header (timestamp and/or offset) and therefore the file mtime.
+            // A stat fast path skips the second header scan when neither size
+            // nor mtime moved; only when the stat changed is the full header
+            // compare (the authoritative check) performed. On filesystems with
+            // pathologically coarse mtime granularity a same-tick write could
+            // slip through — bounded impact: the payloads read are still
+            // position-guarded (xPos/zPos) and the next backup re-inserts the
+            // newer state (header timestamp > chain head).
             long lengthAfter = Files.size(mca);
-            if (after.equals(snapshot) && lengthAfter == lengthAtScan) {
+            java.nio.file.attribute.FileTime mtimeAfter = Files.getLastModifiedTime(mca);
+            boolean stable = lengthAfter == lengthAtScan && mtimeAfter.equals(mtimeAtScan);
+            if (!stable) {
+                Map<Long, RegionScanner.ScannedChunk> after = RegionScanner.scan(mca);
+                stable = after.equals(snapshot) && lengthAfter == lengthAtScan;
+            }
+            if (stable) {
                 int inserted = 0;
                 for (PendingChunk p : pending) {
                     if (insertChunk(zvcr, p.localX(), p.localZ(), p.extracted(), backupTimestamp)) {
@@ -724,24 +750,48 @@ public final class BackupService {
                     }
                 }
                 if (inserted > 0 || !Files.exists(backupPath)) {
-                    ZvcrFiles.atomicWrite(backupPath, ZvcrWriter.serialize(zvcr));
+                    ZvcrFiles.atomicWrite(backupPath,
+                            ZvcrWriter.serialize(zvcr, ZstdCodec.COMPRESSION_LEVEL_FAST));
+                    TimestampSidecar.write(backupPath, TimestampSidecar.collect(zvcr));
                 }
                 return new RegionOutcome(changedChunks.size(), inserted, false);
             }
             if (attempt < MAX_REGION_READ_ATTEMPTS) {
                 LOGGER.warn("r.{}:{} changed while being read (attempt {}/{}) — retrying",
                         rx, rz, attempt, MAX_REGION_READ_ATTEMPTS);
-                try {
-                    Thread.sleep(100L * attempt);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("region read interrupted", e);
-                }
+                // Wait for the file to go quiet instead of a blind sleep: a
+                // region still under an active write storm would only burn
+                // another attempt.
+                waitForQuiescence(mca, 1000L);
             }
         }
         LOGGER.warn("r.{}:{} kept changing while being read — skipped this backup round; "
                 + "the next backup will pick it up", rx, rz);
         return new RegionOutcome(0, 0, true);
+    }
+
+    /**
+     * Waits until {@code file}'s mtime has been stable across one poll
+     * interval, bounded by {@code budgetMs}. Best effort: on IO errors or
+     * timeout it returns and the optimistic-concurrency scan decides.
+     */
+    private static void waitForQuiescence(Path file, long budgetMs) {
+        long deadline = System.currentTimeMillis() + budgetMs;
+        java.nio.file.attribute.FileTime previous = null;
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                java.nio.file.attribute.FileTime current = Files.getLastModifiedTime(file);
+                if (current.equals(previous)) {
+                    return;
+                }
+                previous = current;
+                Thread.sleep(100L);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException e) {
+            // file vanished or is not statable — let the scan handle it
+        }
     }
 
     private boolean insertChunk(ZvcrFile zvcr, int localX, int localZ,
@@ -774,8 +824,8 @@ public final class BackupService {
         DeltaInsertionResult teResult = segment.tileEntities.insertSnapshot(timestamp, extracted.tileEntities);
         anyChange |= teResult instanceof DeltaInsertionResult.Success;
 
-        segment.info.insertSnapshot(new space.cobaltworks.zrdback.zvcr.region.SegmentState(
-                space.cobaltworks.zrdback.zvcr.region.SegmentStateType.NEW, timestamp));
+        segment.info.insertSnapshot(new space.cobaltworks.zvcr.region.SegmentState(
+                space.cobaltworks.zvcr.region.SegmentStateType.NEW, timestamp));
         return anyChange;
     }
 
@@ -791,36 +841,19 @@ public final class BackupService {
     /**
      * Checkpoint policy: materialize the oldest state once
      * {@code checkpointInterval} deltas have accumulated since the newest
-     * full snapshot. "Full" detection unpacks entries and checks for
-     * {@code 0xFFFF} atoms — sound in practice (0xFFFF is not a valid
-     * blockstate/biome ID), self-healing, and needs no sidecar state.
+     * full snapshot. The chain tracks that distance incrementally (see
+     * {@link PackedDeltaData#deltasSinceFull}), so this is O(1) per insert
+     * instead of re-deriving it by unpacking up to a full checkpoint gap of
+     * deltas. "Full" detection ({@link PackedDeltaData#isFull}) unpacks
+     * entries and checks for {@code 0xFFFF} atoms — sound in practice
+     * (0xFFFF is not a valid blockstate/biome ID), self-healing, and needs no
+     * sidecar state.
      */
     private void maybeCheckpoint(PackedDeltaData chain) {
-        List<PackedSnapshot> deltas = chain.reverseDeltas();
-        int deltasSinceFull = 0;
-        for (int i = 1; i < deltas.size(); i++) { // index 0 (head) is always full
-            if (looksFull(chain, deltas.get(i))) {
-                break;
-            }
-            deltasSinceFull++;
+        if (chain.deltasSinceFull() >= config.checkpointInterval()) {
+            chain.insertCheckpoint(chain.size() - 1);
         }
-        if (deltasSinceFull >= config.checkpointInterval()) {
-            chain.insertCheckpoint(deltas.size() - 1);
-        }
-    }
-
-    private static boolean looksFull(PackedDeltaData chain, PackedSnapshot snapshot) {
-        if (snapshot.data() instanceof PackedData.SingleValue) {
-            return true; // a single-value entry is always a full snapshot
-        }
-        int[] atoms = snapshot.data().unpack(chain.unpackedSize());
-        for (int atom : atoms) {
-            if (atom == Zvcr.STATE_UNCHANGED) {
-                return false;
-            }
-        }
-        return true;
-    }
+}
 
     private static int countNonNull(Object[] array) {
         int count = 0;

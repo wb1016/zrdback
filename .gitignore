@@ -6,6 +6,7 @@ out/
 .idea/
 .vscode/
 bin/
+logs/
 
 */.gradle/
 */build/
@@ -13,3 +14,4 @@ bin/
 */out/
 */*.iml
 */bin/
+*/logs/

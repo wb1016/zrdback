@@ -60,13 +60,8 @@ public final class BackupCommands {
                                                             com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "sectionY"));
                                                     return 1;
                                                 })))))
-                .then(Commands.literal("now").executes(context -> {
-                    BackupService service = requireService(context.getSource(), serviceSupplier);
-                    if (service == null) {
-                        return 0;
-                    }
-                    enqueue(context.getSource(), "Backup started", () -> {
-                        try {
+                .then(Commands.literal("now").executes(context ->
+                        run(context.getSource(), serviceSupplier, "Backup started", service -> {
                             BackupService.Result result = service.runBackup();
                             String message = "Backup finished: " + result.regionsScanned() + " regions scanned, "
                                     + result.chunksChanged() + " chunks changed, "
@@ -81,73 +76,30 @@ public final class BackupCommands {
                                         + " region(s) skipped (world was being modified) — run again once chunk generation settles";
                             }
                             return message;
-                        } catch (java.io.IOException e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
-                    return 1;
-                }))
+                        })))
                 .then(Commands.literal("prune")
                         .then(Commands.argument("days", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1))
                                 .executes(context -> {
-                                    BackupService service = requireService(context.getSource(), serviceSupplier);
-                                    if (service == null) {
-                                        return 0;
-                                    }
                                     int days = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "days");
-                                    enqueue(context.getSource(), "Prune started", () -> {
-                                        try {
-                                            BackupService.Result result = service.prune(days);
-                                            return "Prune finished: " + result.regionsScanned() + " files scanned, "
-                                                    + result.chunksChanged() + " entries removed in "
-                                                    + result.durationMs() + " ms";
-                                        } catch (java.io.IOException e) {
-                                            throw new RuntimeException(e);
-                                        }
+                                    return run(context.getSource(), serviceSupplier, "Prune started", service -> {
+                                        BackupService.Result result = service.prune(days);
+                                        return "Prune finished: " + result.regionsScanned() + " files scanned, "
+                                                + result.chunksChanged() + " entries removed in "
+                                                + result.durationMs() + " ms";
                                     });
-                                    return 1;
                                 })))
                 .then(Commands.literal("restore")
-                        .then(Commands.literal("latest").executes(context -> {
-                            BackupService service = requireService(context.getSource(), serviceSupplier);
-                            if (service == null) {
-                                return 0;
-                            }
-                            long now = java.time.Instant.now().getEpochSecond();
-                            enqueue(context.getSource(), "Restore started", () -> {
-                                try {
-                                    var result = service.restore(now);
-                                    return restoreMessage(result);
-                                } catch (IOException e) {
-                                    throw new RuntimeException(e);
-                                }
-                            });
-                            return 1;
-                        }))
+                        .then(Commands.literal("latest").executes(context ->
+                                run(context.getSource(), serviceSupplier, "Restore started", service ->
+                                        restoreMessage(service.restore(java.time.Instant.now().getEpochSecond())))))
                         .then(Commands.argument("timestamp", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
                                 .executes(context -> {
-                                    BackupService service = requireService(context.getSource(), serviceSupplier);
-                                    if (service == null) {
-                                        return 0;
-                                    }
                                     long ts = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "timestamp");
-                                    enqueue(context.getSource(), "Restore started", () -> {
-                                        try {
-                                            var result = service.restore(ts);
-                                            return restoreMessage(result);
-                                        } catch (IOException e) {
-                                            throw new RuntimeException(e);
-                                        }
-                                    });
-                                    return 1;
+                                    return run(context.getSource(), serviceSupplier, "Restore started", service ->
+                                            restoreMessage(service.restore(ts)));
                                 })))
-                .then(Commands.literal("stats").executes(context -> {
-                    BackupService service = requireService(context.getSource(), serviceSupplier);
-                    if (service == null) {
-                        return 0;
-                    }
-                    enqueue(context.getSource(), "Stats started", () -> {
-                        try {
+                .then(Commands.literal("stats").executes(context ->
+                        run(context.getSource(), serviceSupplier, "Stats started", service -> {
                             BackupService.Stats s = service.stats();
                             return ("Stats: files=%d (%d KiB), segments=%d, chains=%d "
                                     + "(entries %d, avg %.1f, min %d, max %d), teDeltas=%d, "
@@ -158,12 +110,7 @@ public final class BackupCommands {
                                     s.teDeltas(), s.distinctPalettes(), s.paletteRefs(),
                                     100.0 * (1.0 - s.paletteDedupRatio()),
                                     s.trackedFiles(), s.blobCount(), s.blobBytes() / 1024);
-                        } catch (java.io.IOException e) {
-                            throw new RuntimeException(e);
-                        }
-                    });
-                    return 1;
-                }))
+                        })))
                 .then(Commands.literal("list")
                         .executes(context -> executeList(context.getSource(), serviceSupplier,
                                 0, 0, 0, LIST_DEFAULT_KEEP))
@@ -270,19 +217,9 @@ public final class BackupCommands {
     private static int executeList(CommandSourceStack source,
                                    java.util.function.Supplier<BackupService> serviceSupplier,
                                    int minDays, int maxDays, int skipNums, int keepNums) {
-        BackupService service = requireService(source, serviceSupplier);
-        if (service == null) {
-            return 0;
-        }
-        enqueue(source, "List started", () -> {
-            try {
-                return formatList(service.listBackups(minDays, maxDays, skipNums, keepNums),
-                        minDays, maxDays);
-            } catch (java.io.IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
-        return 1;
+        return run(source, serviceSupplier, "List started", service ->
+                formatList(service.listBackups(minDays, maxDays, skipNums, keepNums),
+                        minDays, maxDays));
     }
 
     private static String formatList(BackupService.BackupList list, int minDays, int maxDays) {
@@ -335,6 +272,33 @@ public final class BackupCommands {
         return seconds + "s ago";
     }
 
+    @FunctionalInterface
+    private interface ServiceTask {
+        String run(BackupService service) throws IOException;
+    }
+
+    /**
+     * requireService + async-enqueue boilerplate shared by every subcommand:
+     * resolves the service, sends the "started" line, runs the task off the
+     * server thread and reports the result or failure.
+     */
+    private static int run(CommandSourceStack source,
+                           java.util.function.Supplier<BackupService> serviceSupplier,
+                           String startedMessage, ServiceTask task) {
+        BackupService service = requireService(source, serviceSupplier);
+        if (service == null) {
+            return 0;
+        }
+        enqueue(source, startedMessage, () -> {
+            try {
+                return task.run(service);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        return 1;
+    }
+
     private static void enqueue(CommandSourceStack source, String startedMessage,
                                 java.util.function.Supplier<String> task) {
         CompletableFuture.runAsync(() -> {
@@ -342,8 +306,19 @@ public final class BackupCommands {
             try {
                 result = task.get();
             } catch (Throwable e) {
-                source.sendSystemMessage(Component.literal("ZVCR Backup failed: " + e));
-                space.cobaltworks.zrdback.ZrdBack.LOGGER.error("backup task failed", e);
+                // Unwrap the IOException wrapper so e.g. the single-flight
+                // "another backup is running" message reads cleanly.
+                Throwable cause = e instanceof RuntimeException && e.getCause() != null
+                        ? e.getCause() : e;
+                source.sendSystemMessage(Component.literal("ZVCR Backup failed: "
+                        + (cause.getMessage() != null ? cause.getMessage() : cause)));
+                if (cause instanceof BackupService.StoreBusyException) {
+                    // Expected condition (concurrent manual command) — not an error.
+                    space.cobaltworks.zrdback.ZrdBack.LOGGER.info("backup task skipped: {}",
+                            cause.getMessage());
+                } else {
+                    space.cobaltworks.zrdback.ZrdBack.LOGGER.error("backup task failed", e);
+                }
                 return;
             }
             source.sendSystemMessage(Component.literal(result));

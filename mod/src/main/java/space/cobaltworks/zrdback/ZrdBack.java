@@ -96,6 +96,10 @@ public final class ZrdBack implements ModInitializer {
                 LOGGER.info("Scheduled backup: nothing changed ({} regions scanned, {} ms)",
                         result.regionsScanned(), result.durationMs());
             }
+        } catch (BackupService.StoreBusyException e) {
+            // A manual /zrdback now or prune is running; the scheduled pass
+            // would only duplicate it. Skip quietly.
+            LOGGER.info("Scheduled backup skipped: {}", e.getMessage());
         } catch (Throwable e) {
             // Throwable: a scheduled task that throws is silently cancelled by
             // the executor — log Errors too.
@@ -116,7 +120,10 @@ public final class ZrdBack implements ModInitializer {
             }
             scheduler = null;
         }
-        SERVICE.set(null);
+        BackupService service = SERVICE.getAndSet(null);
+        if (service != null) {
+            service.shutdown();
+        }
         LOGGER.info("ZVCR Backup stopped");
     }
 }

@@ -39,10 +39,10 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 
-import space.cobaltworks.zrdback.zvcr.Zvcr;
-import space.cobaltworks.zrdback.zvcr.region.Dimension;
-import space.cobaltworks.zrdback.zvcr.region.TileEntity;
-import space.cobaltworks.zrdback.zvcr.region.TileEntityPosition;
+import space.cobaltworks.zvcr.Zvcr;
+import space.cobaltworks.zvcr.region.Dimension;
+import space.cobaltworks.zvcr.region.TileEntity;
+import space.cobaltworks.zvcr.region.TileEntityPosition;
 
 /**
  * Extracts ZVCR-semantic data from parsed chunk NBT: per-section blockstate ID
