@@ -1,0 +1,50 @@
+plugins {
+    id 'java-library'
+}
+
+base {
+    archivesName = 'zrdback-store'
+    version = mod_version
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Pure-Java store layer: the ZVCR-3D format library plus the backup store
+    // bookkeeping (blob store, timestamp/epoch sidecars, inspection, pruning).
+    // No Minecraft classes — usable from the CLI without a game install.
+    api project(':zvcr-java')
+
+    // Gson is provided by Minecraft at runtime and by the CLI at runtime;
+    // it is compile-only here so the shaded mod jar does not bundle a
+    // second copy of a library Minecraft already ships.
+    compileOnly "com.google.code.gson:gson:${gson_version}"
+
+    testImplementation "com.google.code.gson:gson:${gson_version}"
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+processResources {
+    inputs.property 'mod_version', mod_version
+    filesMatching('fabric.mod.json') {
+        expand 'mod_version': mod_version
+    }
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << "-Xlint:deprecation"
+    options.encoding = 'UTF-8'
+    options.release = Integer.parseInt(project.java_version)
+}

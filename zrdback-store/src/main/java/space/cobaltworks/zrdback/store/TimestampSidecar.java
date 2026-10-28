@@ -16,9 +16,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
-package space.cobaltworks.zrdback.backup;
+package space.cobaltworks.zrdback.store;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -48,7 +48,7 @@ import space.cobaltworks.zvcr.region.ZvcrFile;
  * is checked by comparing mtimes (the writer always rewrites the sidecar
  * after the {@code .zvcr3d}) plus the recorded file size.
  */
-final class TimestampSidecar {
+public final class TimestampSidecar {
 
     private static final String SUFFIX = ".ts";
     private static final byte[] MAGIC = "ZRDTS1\n".getBytes(StandardCharsets.US_ASCII);
@@ -56,7 +56,7 @@ final class TimestampSidecar {
     private TimestampSidecar() {}
 
     /** Sorted distinct chain timestamps of one parsed {@code .zvcr3d} file. */
-    static long[] collect(ZvcrFile zvcr) {
+    public static long[] collect(ZvcrFile zvcr) {
         TreeSet<Long> stamps = new TreeSet<>();
         for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
             Segment segment = zvcr.region.get(i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
@@ -89,7 +89,7 @@ final class TimestampSidecar {
         }
     }
 
-    static Path sidecarPath(Path zvcrPath) {
+    public static Path sidecarPath(Path zvcrPath) {
         return zvcrPath.resolveSibling(zvcrPath.getFileName().toString() + SUFFIX);
     }
 
@@ -97,7 +97,7 @@ final class TimestampSidecar {
      * Timestamps of one backup file: the sidecar when fresh, otherwise a full
      * parse that also (best-effort) populates the sidecar for next time.
      */
-    static TreeSet<Long> timestampsFor(Path zvcrPath) throws IOException {
+    public static TreeSet<Long> timestampsFor(Path zvcrPath) throws IOException {
         long[] cached = readIfFresh(zvcrPath);
         if (cached != null) {
             TreeSet<Long> stamps = new TreeSet<>();
@@ -116,7 +116,7 @@ final class TimestampSidecar {
     }
 
     /** Oldest timestamp of one file; {@link Long#MAX_VALUE} when it has none. */
-    static long oldestFor(Path zvcrPath) throws IOException {
+    public static long oldestFor(Path zvcrPath) throws IOException {
         TreeSet<Long> stamps = timestampsFor(zvcrPath);
         return stamps.isEmpty() ? Long.MAX_VALUE : stamps.first();
     }
@@ -161,7 +161,7 @@ final class TimestampSidecar {
     }
 
     /** Best-effort sidecar write; failures are swallowed (cache is advisory). */
-    static void write(Path zvcrPath, long[] sortedTimestamps) {
+    public static void write(Path zvcrPath, long[] sortedTimestamps) {
         try {
             byte[] data = new byte[MAGIC.length + 16 + 8 * sortedTimestamps.length];
             System.arraycopy(MAGIC, 0, data, 0, MAGIC.length);

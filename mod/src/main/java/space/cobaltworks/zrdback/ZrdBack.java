@@ -16,14 +16,16 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
 package space.cobaltworks.zrdback;
 
 import java.nio.file.Path;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import net.fabricmc.api.ModInitializer;
@@ -52,12 +54,16 @@ public final class ZrdBack implements ModInitializer {
     private static final AtomicReference<BackupService> SERVICE = new AtomicReference<>();
     private static volatile ScheduledExecutorService scheduler;
 
+    /** Guards against a shutdown backup running twice (stop + stopped events). */
+    private static final AtomicBoolean SHUTDOWN_BACKUP_DONE = new AtomicBoolean();
+
     @Override
     public void onInitialize() {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
                 dispatcher.register(BackupCommands.build(SERVICE::get)));
         ServerLifecycleEvents.SERVER_STARTED.register(ZrdBack::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(ZrdBack::onServerStopping);
+        ServerLifecycleEvents.SERVER_STOPPED.register(ZrdBack::onServerStopped);
         LOGGER.info("ZVCR Backup initialized (read-only world observer, ZVCR-3D writer)");
     }
 
@@ -85,6 +91,14 @@ public final class ZrdBack implements ModInitializer {
         }
     }
 
+    /**
+     * Runs a scheduled backup.
+     *
+     * <p>A store that is busy (a manual backup or prune is running) must not
+     * silently skip the interval — the next backup would then be a full
+     * interval later and the window would silently widen. Instead the pass is
+     * retried shortly, and only a persistently busy store gives up.
+     */
     private static void runGuarded(BackupService service) {
         try {
             BackupService.Result result = service.runBackup();
@@ -97,9 +111,10 @@ public final class ZrdBack implements ModInitializer {
                         result.regionsScanned(), result.durationMs());
             }
         } catch (BackupService.StoreBusyException e) {
-            // A manual /zrdback now or prune is running; the scheduled pass
-            // would only duplicate it. Skip quietly.
-            LOGGER.info("Scheduled backup skipped: {}", e.getMessage());
+            // Another backup or prune holds the store. Retry shortly instead of
+            // dropping the interval: the store is busy for seconds, not hours.
+            LOGGER.info("Scheduled backup skipped ({}), retrying shortly", e.getMessage());
+            scheduleRetry(service);
         } catch (Throwable e) {
             // Throwable: a scheduled task that throws is silently cancelled by
             // the executor — log Errors too.
@@ -107,7 +122,45 @@ public final class ZrdBack implements ModInitializer {
         }
     }
 
+    /** Re-arms the scheduled pass after the store was busy. */
+    private static void scheduleRetry(BackupService service) {
+        ScheduledExecutorService current = scheduler;
+        if (current == null || current.isShutdown()) {
+            return;
+        }
+        current.schedule(() -> runGuarded(service), 1, TimeUnit.MINUTES);
+    }
+
+    /**
+     * The server is stopping: take a final backup so the shutdown state
+     * (players, last edits) is captured instead of waiting for the next
+     * scheduled pass.
+     *
+     * <p>Fires on the server thread, at the head of {@code stopServer()} — the
+     * world is still fully loaded and writable, and the pre-backup save runs
+     * inline.
+     */
     private static void onServerStopping(MinecraftServer server) {
+        BackupService service = SERVICE.get();
+        if (service == null || !service.backupOnStop()) {
+            return;
+        }
+        if (!SHUTDOWN_BACKUP_DONE.compareAndSet(false, true)) {
+            return;
+        }
+        LOGGER.info("Server stopping — running the final backup");
+        try {
+            BackupService.Result result = service.runFinalBackup();
+            LOGGER.info("Final backup: {} regions scanned, {} chunks changed, {} inserted ({} ms)",
+                    result.regionsScanned(), result.chunksChanged(), result.chunksInserted(),
+                    result.durationMs());
+        } catch (Exception e) {
+            LOGGER.error("Final backup failed", e);
+        }
+    }
+
+    /** The server has stopped: shut down the worker pool. */
+    private static void onServerStopped(MinecraftServer server) {
         ScheduledExecutorService current = scheduler;
         if (current != null) {
             current.shutdown();

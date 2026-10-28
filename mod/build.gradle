@@ -16,7 +16,9 @@ dependencies {
     implementation "net.fabricmc.fabric-api:fabric-api:${fabric_api_version}"
 
     implementation project(':zvcr-java')
+    implementation project(':zrdback-store')
     include project(':zvcr-java')
+    include project(':zrdback-store')
     include "com.github.luben:zstd-jni:${zstd_jni_version}"
 
     testImplementation platform("org.junit:junit-bom:${junit_version}")

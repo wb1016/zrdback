@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
 package space.cobaltworks.zrdback.backup;
 
@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -67,6 +68,10 @@ import space.cobaltworks.zvcr.region.Segment;
 import space.cobaltworks.zvcr.region.TileEntity;
 import space.cobaltworks.zvcr.region.TileEntityPosition;
 import space.cobaltworks.zvcr.region.ZvcrFile;
+import space.cobaltworks.zrdback.store.EpochSidecar;
+import space.cobaltworks.zrdback.store.FileBlobStore;
+import space.cobaltworks.zrdback.store.RegistryManifest;
+import space.cobaltworks.zrdback.store.TimestampSidecar;
 import space.cobaltworks.zrdback.BackupConfig;
 
 /**
@@ -93,7 +98,8 @@ public final class WorldRestorer {
     }
 
     public record Result(int chunksRestored, int chunksSkipped, int filesRestored,
-                         Path targetDir, long durationMs) {}
+                         Path targetDir, long durationMs, int missingBlocks,
+                         int missingBiomes) {}
 
     /** Per-file restore outcome (region files are restored in parallel). */
     private record RegionRestore(int restored, int skipped) {}
@@ -109,6 +115,15 @@ public final class WorldRestorer {
      * vanilla re-seeds on first open.
      */
     public Result restore(long timestamp) throws IOException {
+        return restore(timestamp, RestoreOptions.all());
+    }
+
+    /**
+     * Restores the world as of {@code timestamp}, honouring {@code options}.
+     *
+     * @see #restore(long)
+     */
+    public Result restore(long timestamp, RestoreOptions options) throws IOException {
         long start = System.currentTimeMillis();
         FileBlobStore blobs = FileBlobStore.open(config.outputDirectory());
         long blobOldest = blobs.oldestTimestamp();
@@ -122,14 +137,17 @@ public final class WorldRestorer {
         // Fail fast: verify chunk-data coverage BEFORE touching the target
         // directory. The per-file timestamp sidecars make this O(files); a
         // missing sidecar costs one parse (and populates the sidecar).
-        long dataOldest = prescanOldestTimestamp();
-        if (dataOldest == Long.MAX_VALUE) {
+        long dataOldest = options.chunks() ? prescanOldestTimestamp() : Long.MAX_VALUE;
+        if (options.chunks() && dataOldest == Long.MAX_VALUE) {
             throw new IOException("The backup store contains no chunk data to restore.");
         }
-        if (timestamp < dataOldest) {
+        if (options.chunks() && timestamp < dataOldest) {
             throw new IOException("No backup data exists at or before " + timestamp
                     + " (oldest recorded chunk state: " + dataOldest
                     + "). Use /zrdback list to see available backups, or /zrdback restore latest.");
+        }
+        if (!options.chunks() && !options.files()) {
+            throw new IOException("Nothing to restore: both chunks and files are disabled.");
         }
 
         Path targetRoot = config.outputDirectory().resolve("restore").resolve(Long.toString(timestamp));
@@ -142,8 +160,12 @@ public final class WorldRestorer {
         Files.createDirectories(targetRoot);
 
         try {
-            RegionRestore regions = restoreRegions(timestamp, targetRoot);
-            int files = blobs.restore(timestamp, targetRoot);
+            RegionRestore regions = options.chunks()
+                    ? restoreRegions(timestamp, targetRoot, options.dimensions())
+                    : new RegionRestore(0, 0);
+            int files = options.files()
+                    ? blobs.restore(timestamp, targetRoot, options.playerDataFilter())
+                    : 0;
 
             if (regions.restored() == 0 && files == 0) {
                 throw new IOException("The last backup captured no chunk data — the world was "
@@ -151,12 +173,17 @@ public final class WorldRestorer {
                         + "Run /zrdback now again once chunk generation has settled, then restore.");
             }
             return new Result(regions.restored(), regions.skipped(), files, targetRoot,
-                    System.currentTimeMillis() - start);
+                    System.currentTimeMillis() - start, missingBlocks, missingBiomes);
         } catch (IOException e) {
             deleteRecursively(targetRoot);
             throw e;
         }
     }
+
+    /** Blocks that no longer exist in the current registry and became air. */
+    private int missingBlocks;
+    /** Biomes that no longer exist in the current registry. */
+    private int missingBiomes;
 
     /**
      * Oldest recorded chunk timestamp across all {@code .zvcr3d} files — the
@@ -191,11 +218,17 @@ public final class WorldRestorer {
      * Restores all region files in parallel on the worker pool (same shape as
      * backup/prune). All tasks are awaited even when one fails, so cleanup
      * below never races a still-writing task; the first failure is rethrown.
+     *
+     * @param dimensions the dimensions to restore; empty restores none
      */
-    private RegionRestore restoreRegions(long timestamp, Path targetRoot) throws IOException {
+    private RegionRestore restoreRegions(long timestamp, Path targetRoot,
+                                         Set<Dimension> dimensions) throws IOException {
         record Task(Path file, int rx, int rz, Dimension dimension) {}
         List<Task> tasks = new ArrayList<>();
         for (Dimension dimension : Dimension.values()) {
+            if (!dimensions.contains(dimension)) {
+                continue;
+            }
             Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
             if (!Files.isDirectory(dimDir)) {
                 continue;
@@ -247,6 +280,12 @@ public final class WorldRestorer {
             return new RegionRestore(0, 0);
         }
 
+        // The stored atoms are registry IDs. If the backup was written under a
+        // different registry (MC update, mod added/removed), translate them by
+        // name — otherwise the restore would place the wrong blocks while
+        // still looking valid.
+        remapperFor(zvcrPath).remapFile(zvcr);
+
         // Mirror the live layout in the target directory.
         ResourceKey<Level> levelKey = levelKeyFor(dimension);
         Path dimDir = DimensionType.getStorageFolder(levelKey, targetRoot);
@@ -286,6 +325,45 @@ public final class WorldRestorer {
         }
         return new RegionRestore(restored, skipped);
     }
+
+    /**
+     * The remapper that translates a backup file's atoms into the live
+     * registry.
+     *
+     * <p>When the file was written under a different registry, its IDs are
+     * translated by name through the manifest of that epoch. A file whose
+     * epoch cannot be determined keeps the historical behaviour (the IDs are
+     * used as they are).
+     */
+    private RegistryRemapper remapperFor(Path backupPath) throws IOException {
+        String fingerprint = EpochSidecar.read(backupPath);
+        if (fingerprint == null) {
+            return RegistryRemapper.identity();
+        }
+        try {
+            RegistryManifest stored = RegistryManifest.read(config.outputDirectory(), fingerprint);
+            return RegistryRemapper.from(stored, liveSnapshot());
+        } catch (IOException e) {
+            throw new IOException("no registry manifest for epoch " + fingerprint
+                    + " — " + backupPath.getFileName() + " was written under a different Minecraft "
+                    + "or mod version and cannot be restored safely", e);
+        }
+    }
+
+    /**
+     * The live registry's ID → name mapping, captured once per restore.
+     *
+     * <p>Capturing it walks the whole block-state registry, so it is computed
+     * once and reused for every region file.
+     */
+    private synchronized RegistrySnapshot liveSnapshot() {
+        if (liveSnapshot == null) {
+            liveSnapshot = RegistrySnapshot.capture(server);
+        }
+        return liveSnapshot;
+    }
+
+    private RegistrySnapshot liveSnapshot;
 
     /**
      * Oldest recorded state timestamp of a segment: the tail entry of its
@@ -379,8 +457,12 @@ public final class WorldRestorer {
             }
             BlockState state = Block.BLOCK_STATE_REGISTRY.byId(atom);
             if (state == null) {
-                throw new IllegalStateException("Unknown blockstate ID " + atom
-                        + " — protocol version mismatch?");
+                // The block no longer exists in the current registry (it was
+                // removed by an update or a mod change). Air is the safe
+                // fallback: the position keeps its shape, the missing block
+                // does not silently become a different one.
+                missingBlocks++;
+                continue;
             }
             container.set(i & 15, (i >> 8) & 15, (i >> 4) & 15, state);
         }
@@ -391,8 +473,10 @@ public final class WorldRestorer {
         for (int i = 0; i < atoms.length; i++) {
             Holder<Biome> holder = holderIdMap.byId(atoms[i]);
             if (holder == null) {
-                throw new IllegalStateException("Unknown biome ID " + atoms[i]
-                        + " — protocol version mismatch?");
+                // The biome no longer exists — keep the container's default
+                // rather than aborting the whole restore.
+                missingBiomes++;
+                continue;
             }
             container.set(i & 3, (i >> 4) & 3, (i >> 2) & 3, holder);
         }

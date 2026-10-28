@@ -24,12 +24,19 @@ zrdback
 │   ├── block/biome palette tables (canonical ordering, dedup)
 │   ├── tile entity history (put/erase, canonical NBT)
 │   ├── region container serialization + Zstd level 8 (frame checksum)
+│   ├── registry remapping (translate a chain between registry epochs)
 │   └── directory layout + floorDiv32 sector math
+├── zrdback-store         pure-Java store layer (no Minecraft classes)
+│   ├── FileBlobStore    content-addressed blobs for non-chunk files
+│   ├── RegistryManifest registry epoch tables (ID -> namespaced name)
+│   ├── EpochSidecar     which registry epoch a backup file was written under
+│   ├── StoreVerifier    integrity check over a whole store
+│   └── StorePruner      retention pruning
+├── cli                  standalone tool for the store (list/verify/stats/prune)
 ├── BackupService        header scan -> change gate -> extract -> insert -> atomic write
 │                         (region files processed in parallel by nice-19 workers)
-├── FileBlobStore        content-addressed blobs for non-chunk files (level.dat, players, ...)
 ├── WorldRestorer        reconstructs a bootable world from any timestamp
- └── /zrdback             now | prune | restore | list | stats | status
+└── /zrdback              now | prune | restore | list | diff | verify | stats | status
 ```
 
 # Performance
@@ -159,6 +166,9 @@ Configuration lives under `config/zrdback.properties`
 | `checkpoint-interval` | `32` | Full snapshot every N deltas per chain (bounds reconstruction cost). |
 | `retention-days` | `0` | Auto-prune entries older than N days after each backup. `0` = keep forever. |
 | `threads` | `0` | Worker threads for backup/prune. `0` = auto (half the cores, min 1). Workers run at minimum priority so ticks are served first. |
+| `backup-on-stop` | `true` | Run a final backup while the server shuts down, so the shutdown state (players, last edits) is captured instead of waiting for the next scheduled pass. |
+| `compression-level` | `4` | Zstd level for incremental backups (1..19). Prune rewrites always use level 8. |
+| `dimensions` | (empty) | Comma-separated dimensions to back up (`overworld,nether,end`). Empty = all of them. |
 
 In singleplayer the world save's parent is the shared `saves/` directory of the
 whole instance, so the store root is always scoped per save
@@ -176,10 +186,15 @@ and recent edits are never lost to the autosave interval.
 |---|---|
 | `/zrdback now` | Run an incremental backup immediately. |
 | `/zrdback restore <timestamp\|latest>` | Reconstruct the world as of a unix timestamp into `<output>/restore/<timestamp>/`. |
+| `/zrdback restore <timestamp> dimension <name>` | Restore only one dimension's chunks (`overworld`, `nether`, `end`). |
+| `/zrdback restore <timestamp> files-only` | Restore only the auxiliary files (level.dat, player data, ...). |
+| `/zrdback restore <timestamp> player <name>` | Restore only the auxiliary files whose path contains `<name>`. |
 | `/zrdback list [min-days] [max-days] [skip-nums] [keep-nums]` | List restore-point timestamps, newest first, whose age is between `min-days` and `max-days` (inclusive; `max-days` 0 = unbounded), after skipping the `skip-nums` newest; shows at most `keep-nums` (default 50). Omitted: min 0, max unbounded, skip 0. |
+| `/zrdback diff <older> <newer>` | Compare two restore points: how many chunks and auxiliary files changed between them. |
+| `/zrdback verify` | Check the store for corruption: every region file parses, chains are ordered, the blob index matches the blobs on disk, protocol versions agree. |
 | `/zrdback prune <days>` | Drop chain/blob history older than N days (newest state is always kept), GC unreferenced blobs. |
 | `/zrdback stats` | Chain lengths, palette dedup ratio, blob store size for tuning `checkpoint-interval`. |
-| `/zrdback status` | Config summary + blob store size. |
+| `/zrdback status` | Config summary, blob store size, time of the last successful backup. |
 
 ## Backup layout
 
@@ -188,11 +203,39 @@ zrdback-backups/
 ├── overworld/<sectorX>/<sectorZ>/r.<regionX>.<regionZ>.zvcr3d
 ├── nether/...  end/...
 ├── blobs/<sha256>.zst          # deduplicated auxiliary files
-└── files-index.json            # per-file {timestamp, hash} history
+├── files-index.json            # per-file {timestamp, hash} history
+├── registry/<fingerprint>.manifest   # registry ID -> namespaced name tables
+└── restore/<timestamp>/        # output of a restore
 ```
 
 Region coordinates use the standard Anvil mapping; sector directories are
 `floorDiv(region, 32)` (correct for negative coordinates).
+
+Each region file has two sidecars next to it:
+
+- `r.X.Z.zvcr3d.ts` — the file's sorted chain timestamps (advisory cache).
+- `r.X.Z.zvcr3d.ep` — the registry epoch the file's atoms were written under.
+
+## Registry epochs (cross-version restore)
+
+Chunks store blocks and biomes as numeric registry IDs. Those IDs only mean
+something for the exact registry that produced them: a Minecraft update, a mod
+added or removed, or a datapack change shifts the ID space — and a backup
+taken before the change would then restore the **wrong blocks** while still
+looking perfectly valid.
+
+The mod therefore records the registry ID → namespaced name mapping of the
+registry it backed up against (`registry/<fingerprint>.manifest`) and tags
+every region file with the epoch it was written under. On restore, a file from
+a different epoch is translated *by name* into the current registry, so:
+
+- blocks that still exist are restored correctly, even across MC versions;
+- blocks that no longer exist become air (never a different block);
+- biomes that no longer exist fall back to the world's default.
+
+The translation applies to every entry of a chain, not just its head: a delta
+stores the previous value of each changed position, so the head and the deltas
+below it have to move through the same table to stay consistent.
 
 ## Restoring
 
@@ -204,6 +247,34 @@ Region coordinates use the standard Anvil mapping; sector directories are
 Stop the server, replace the world folder with the contents of the restore directory,
 start the server. The restored world boots like the original (verified: zero load errors,
 block states and tile entities intact).
+
+Partial restores are available when the goal is to extract something from a
+backup rather than rebuild a world:
+
+```
+/zrdback restore <ts> dimension nether    # only one dimension's chunks
+/zrdback restore <ts> files-only          # only level.dat, player data, ...
+/zrdback restore <ts> player Steve        # only the files whose path contains "Steve"
+```
+
+`/zrdback diff <older> <newer>` compares two restore points and reports how
+many chunks and auxiliary files changed between them.
+
+## Command-line tool
+
+`zrdback-cli` operates on a store without running Minecraft — useful for
+checking a backup on a machine that has no game installed, or for automating
+retention:
+
+```
+zrdback-cli list    --store DIR [--days N]   # restore points
+zrdback-cli stats   --store DIR             # store statistics
+zrdback-cli verify  --store DIR             # integrity check
+zrdback-cli prune   --store DIR --days N    # drop history older than N days
+```
+
+`verify` parses every region file, checks the chain ordering, verifies the
+blob index against the blobs on disk, and reports protocol-version mismatches.
 
 # License and credits
 

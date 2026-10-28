@@ -16,9 +16,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
-package space.cobaltworks.zrdback.backup;
+package space.cobaltworks.zrdback.store;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -81,6 +81,38 @@ class FileBlobStoreTest {
         assertEquals(2, store.restore(3000, target2));
         assertTrue(Arrays.equals(new byte[] {2, 2}, Files.readAllBytes(target2.resolve("players/data/a.dat"))));
         assertTrue(Arrays.equals(new byte[] {3}, Files.readAllBytes(target2.resolve("players/data/b.dat"))));
+    }
+
+    @Test
+    void restoresOnlyTheMatchingFiles(@TempDir Path tmp) throws Exception {
+        Path world = tmp.resolve("world");
+        Path backup = tmp.resolve("backups");
+        write(world.resolve("level.dat"), new byte[] {1});
+        write(world.resolve("playerdata").resolve("Steve.dat"), new byte[] {2});
+        write(world.resolve("playerdata").resolve("Alex.dat"), new byte[] {3});
+        FileBlobStore store = FileBlobStore.open(backup);
+        store.store(world, "level.dat", 1000);
+        store.store(world, "playerdata/Steve.dat", 1000);
+        store.store(world, "playerdata/Alex.dat", 1000);
+        store.flush();
+
+        Path target = tmp.resolve("restore");
+        assertEquals(1, store.restore(1000, target, "Steve"));
+        assertTrue(Files.exists(target.resolve("playerdata").resolve("Steve.dat")));
+        assertFalse(Files.exists(target.resolve("level.dat")));
+        assertFalse(Files.exists(target.resolve("playerdata").resolve("Alex.dat")));
+    }
+
+    @Test
+    void theFilterIsCaseInsensitive(@TempDir Path tmp) throws Exception {
+        Path world = tmp.resolve("world");
+        Path backup = tmp.resolve("backups");
+        write(world.resolve("playerdata").resolve("Steve.dat"), new byte[] {2});
+        FileBlobStore store = FileBlobStore.open(backup);
+        store.store(world, "playerdata/Steve.dat", 1000);
+        store.flush();
+
+        assertEquals(1, store.restore(1000, tmp.resolve("restore"), "steve"));
     }
 
     @Test

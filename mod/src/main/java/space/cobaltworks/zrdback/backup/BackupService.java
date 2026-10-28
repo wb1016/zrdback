@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
 package space.cobaltworks.zrdback.backup;
 
@@ -57,7 +57,13 @@ import space.cobaltworks.zvcr.io.ZvcrWriter;
 import space.cobaltworks.zvcr.region.Dimension;
 import space.cobaltworks.zvcr.region.RegionLocation;
 import space.cobaltworks.zvcr.region.Segment;
+import space.cobaltworks.zvcr.region.TileEntityHistory;
+import space.cobaltworks.zvcr.region.TileEntityListDelta;
 import space.cobaltworks.zvcr.region.ZvcrFile;
+import space.cobaltworks.zrdback.store.EpochSidecar;
+import space.cobaltworks.zrdback.store.FileBlobStore;
+import space.cobaltworks.zrdback.store.RegistryManifest;
+import space.cobaltworks.zrdback.store.TimestampSidecar;
 import space.cobaltworks.zrdback.BackupConfig;
 
 /**
@@ -83,6 +89,12 @@ public final class BackupService {
     private final ExecutorService workerPool;
     /** Serializes store mutations: a backup and a prune never interleave. */
     private final ReentrantLock mutationLock = new ReentrantLock();
+    /** Timestamp of the last successful backup, for {@code /zrdback status}. */
+    private final java.util.concurrent.atomic.AtomicLong lastBackupAt =
+            new java.util.concurrent.atomic.AtomicLong(-1);
+    /** Consecutive failed backups, so a broken store does not fail silently. */
+    private final java.util.concurrent.atomic.AtomicInteger consecutiveFailures =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     public BackupService(BackupConfig config, MinecraftServer server) {
         this.config = config;
@@ -114,12 +126,24 @@ public final class BackupService {
         return config.checkpointInterval();
     }
 
+    /** Whether to run a final backup while the server shuts down. */
+    public boolean backupOnStop() {
+        return config.backupOnStop();
+    }
+
     /**
      * Restores the world as of {@code timestamp} into
      * {@code <output>/restore/<timestamp>/} — never into the live world save.
      */
     public WorldRestorer.Result restore(long timestamp) throws IOException {
         return new WorldRestorer(config, server).restore(timestamp);
+    }
+
+    /**
+     * Restores the world as of {@code timestamp}, honouring {@code options}.
+     */
+    public WorldRestorer.Result restore(long timestamp, RestoreOptions options) throws IOException {
+        return new WorldRestorer(config, server).restore(timestamp, options);
     }
 
     /**
@@ -207,6 +231,199 @@ public final class BackupService {
     /** One page of {@code /zrdback list} output. */
     public record BackupList(long queriedAt, int totalStore, int totalInRange, int skipped,
                              List<Long> timestamps, long durationMs) {}
+
+    /**
+     * What changed between two restore points.
+     *
+     * @param chunksChanged chunks whose content differs between the two points
+     * @param chunksOnlyInNew chunks that exist only in the newer point
+     * @param chunksOnlyInOld chunks that exist only in the older point
+     * @param filesChanged auxiliary files whose content differs
+     * @param durationMs how long the comparison took
+     */
+    public record Diff(int chunksChanged, int chunksOnlyInNew, int chunksOnlyInOld,
+                        int filesChanged, long durationMs) {}
+
+    /**
+     * Compares two restore points.
+     *
+     * <p>Chunks are compared through their stored chains: a chunk counts as
+     * changed when its reconstructed state differs between the two timestamps.
+     * The comparison is per chunk and per section, so it is exact but costs
+     * one reconstruction per chunk — fine for an operator-initiated command,
+     * too slow for a periodic job.
+     *
+     * @param older the earlier timestamp
+     * @param newer the later timestamp
+     */
+    public Diff diff(long older, long newer) throws IOException {
+        long start = System.currentTimeMillis();
+        if (older > newer) {
+            long swap = older;
+            older = newer;
+            newer = swap;
+        }
+        int changed = 0;
+        int onlyNew = 0;
+        int onlyOld = 0;
+
+        for (Dimension dimension : Dimension.values()) {
+            Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
+            if (!Files.isDirectory(dimDir)) {
+                continue;
+            }
+            try (Stream<Path> files = Files.walk(dimDir)) {
+                for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".zvcr3d")).toList()) {
+                    ZvcrFile zvcr = ZvcrFiles.readFile(file);
+                    for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
+                        Segment segment = zvcr.region.get(
+                                i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
+                                i % Zvcr.REGION_SIDELENGTH_SEGMENTS).orElse(null);
+                        if (segment == null) {
+                            continue;
+                        }
+                        ChunkState oldState = chunkState(segment, older);
+                        ChunkState newState = chunkState(segment, newer);
+                        if (oldState == null && newState == null) {
+                            continue;
+                        }
+                        if (oldState == null) {
+                            onlyNew++;
+                        } else if (newState == null) {
+                            onlyOld++;
+                        } else if (!oldState.equals(newState)) {
+                            changed++;
+                        }
+                    }
+                }
+            }
+        }
+
+        int filesChanged = diffFiles(older, newer);
+        return new Diff(changed, onlyNew, onlyOld, filesChanged,
+                System.currentTimeMillis() - start);
+    }
+
+    /**
+     * The reconstructed state of one chunk at a timestamp: the block and biome
+     * section contents plus the tile-entity list.
+     */
+    record ChunkState(int[] blocks, int[] biomes, int tileEntities) {
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof ChunkState other
+                    && java.util.Arrays.equals(blocks, other.blocks)
+                    && java.util.Arrays.equals(biomes, other.biomes)
+                    && tileEntities == other.tileEntities;
+        }
+
+        @Override
+        public int hashCode() {
+            return java.util.Arrays.hashCode(blocks) * 31
+                    + java.util.Arrays.hashCode(biomes) * 31 + tileEntities;
+        }
+    }
+
+    /**
+     * The state of a chunk at {@code timestamp}, or null when it had none.
+     *
+     * <p>{@code snapshotBefore} clamps to the oldest known state, so it cannot
+     * answer "the chunk did not exist yet". Each chain is therefore checked
+     * against its own oldest entry: a chain whose oldest entry is newer than
+     * the queried timestamp contributes nothing.
+     */
+    static ChunkState chunkState(Segment segment, long timestamp) {
+        java.util.List<int[]> blocks = new java.util.ArrayList<>();
+        java.util.List<int[]> biomes = new java.util.ArrayList<>();
+        boolean any = false;
+        for (int s = 0; s < segment.sectionCount; s++) {
+            PackedDeltaData blockChain = segment.blockSections.section(s);
+            if (hadStateBefore(blockChain, timestamp)) {
+                blocks.add(blockChain.snapshotBefore(timestamp).orElseThrow());
+                any = true;
+            }
+            PackedDeltaData biomeChain = segment.biomeSections.section(s);
+            if (hadStateBefore(biomeChain, timestamp)) {
+                biomes.add(biomeChain.snapshotBefore(timestamp).orElseThrow());
+                any = true;
+            }
+        }
+        int tileEntities = -1;
+        if (hadTileStateBefore(segment.tileEntities, timestamp)) {
+            tileEntities = segment.tileEntities.snapshotBefore(timestamp)
+                    .map(Map::size).orElse(0);
+            any = true;
+        }
+        if (!any) {
+            return null;
+        }
+        return new ChunkState(concat(blocks), concat(biomes), tileEntities);
+    }
+
+    /** True when the chain holds a state at or before {@code timestamp}. */
+    private static boolean hadStateBefore(PackedDeltaData chain, long timestamp) {
+        java.util.List<PackedSnapshot> entries = chain.reverseDeltas();
+        if (entries.isEmpty()) {
+            return false;
+        }
+        // The chain is newest-first, so the last entry is the oldest state.
+        return entries.get(entries.size() - 1).timestamp() <= timestamp;
+    }
+
+    /** True when the tile-entity history holds a state at or before {@code timestamp}. */
+    private static boolean hadTileStateBefore(TileEntityHistory history, long timestamp) {
+        java.util.List<TileEntityListDelta> entries = history.reverseDeltas();
+        if (entries.isEmpty()) {
+            return false;
+        }
+        return entries.get(entries.size() - 1).timestamp() <= timestamp;
+    }
+
+    private static int[] concat(List<int[]> parts) {
+        int total = 0;
+        for (int[] part : parts) {
+            total += part.length;
+        }
+        int[] out = new int[total];
+        int offset = 0;
+        for (int[] part : parts) {
+            System.arraycopy(part, 0, out, offset, part.length);
+            offset += part.length;
+        }
+        return out;
+    }
+
+    /** Counts the auxiliary files whose content differs between two points. */
+    private int diffFiles(long older, long newer) {
+        try {
+            FileBlobStore blobs = FileBlobStore.open(config.outputDirectory());
+            Map<String, List<FileBlobStore.Entry>> tracked = blobs.trackedEntries();
+            int changed = 0;
+            for (Map.Entry<String, List<FileBlobStore.Entry>> file : tracked.entrySet()) {
+                String oldHash = hashAt(file.getValue(), older);
+                String newHash = hashAt(file.getValue(), newer);
+                if (!java.util.Objects.equals(oldHash, newHash)) {
+                    changed++;
+                }
+            }
+            return changed;
+        } catch (IOException e) {
+            LOGGER.warn("could not compare auxiliary files: " + e);
+            return 0;
+        }
+    }
+
+    /** The content hash of a file's newest entry at or before {@code timestamp}. */
+    private static String hashAt(List<FileBlobStore.Entry> history, long timestamp) {
+        FileBlobStore.Entry best = null;
+        for (FileBlobStore.Entry entry : history) {
+            if (entry.timestamp() <= timestamp && (best == null || entry.timestamp() > best.timestamp())) {
+                best = entry;
+            }
+        }
+        return best == null ? null : best.hash();
+    }
 
     /**
      * Lists restore points: newest first, restricted to backups whose age at
@@ -303,19 +520,120 @@ public final class BackupService {
         } catch (IOException e) {
             sb.append(", blob-store unavailable");
         }
+        Long last = lastBackupAt.get();
+        sb.append(", last-backup=").append(last == null ? "never" : last);
+        if (consecutiveFailures.get() > 0) {
+            sb.append(", consecutive-failures=").append(consecutiveFailures.get());
+        }
         return sb.toString();
     }
 
     public record Result(int regionsScanned, int chunksChanged, int chunksInserted,
                          int blobsStored, int entriesPruned, int regionsSkipped,
-                         long durationMs) {}
+                         int regionsFailed, long durationMs) {}
 
-    /** Per-region backup outcome: skipped = the region kept changing while
-     *  being read (world was being modified) and was left for a later pass. */
-    private record RegionOutcome(int changed, int inserted, boolean skipped) {}
+    /**
+     * Per-region backup outcome: skipped = the region kept changing while
+     * being read (world was being modified) and was left for a later pass;
+     * failed = the region could not be backed up at all (corrupt or
+     * unreadable file), but the rest of the backup continued.
+     */
+    private record RegionOutcome(int changed, int inserted, boolean skipped, boolean failed) {
+        static RegionOutcome ok(int changed, int inserted) {
+            return new RegionOutcome(changed, inserted, false, false);
+        }
+
+        static RegionOutcome unstable() {
+            return new RegionOutcome(0, 0, true, false);
+        }
+
+        static RegionOutcome error() {
+            return new RegionOutcome(0, 0, false, true);
+        }
+    }
 
     /** Re-submission rounds for regions that were unstable while being read. */
     private static final int MAX_BACKUP_WAVES = 4;
+
+    /**
+     * The registry epoch the live server runs with, captured once per backup
+     * run.
+     *
+     * <p>Capturing it walks the whole block-state registry, so it is cached
+     * for the duration of the run and reused by every region.
+     */
+    private RegistrySnapshot liveSnapshot;
+
+    /**
+     * The registry epoch of the running server.
+     *
+     * <p>The snapshot maps every registry ID to its canonical name; the
+     * fingerprint identifies that mapping. Both are written into the store so
+     * that a backup taken under a different registry can be translated on
+     * restore.
+     */
+    private synchronized RegistrySnapshot liveSnapshot() {
+        if (liveSnapshot == null) {
+            liveSnapshot = RegistrySnapshot.capture(server);
+            try {
+                liveSnapshot.manifest().writeIfAbsent(config.outputDirectory());
+            } catch (IOException e) {
+                LOGGER.warn("could not write the registry manifest: " + e);
+            }
+        }
+        return liveSnapshot;
+    }
+
+    /**
+     * Drops the cached registry snapshot.
+     *
+     * <p>The biome registry is dynamic — a datapack reload can shift its IDs —
+     * so the snapshot is taken per backup run rather than per server lifetime.
+     */
+    private synchronized void resetRegistrySnapshot() {
+        liveSnapshot = null;
+    }
+
+    /**
+     * The remapper that translates a backup file's atoms into the live
+     * registry.
+     *
+     * <p>A file written under a different registry needs its IDs translated
+     * by name — otherwise the restore would place the <em>wrong blocks</em>
+     * while still looking valid. When the file's epoch cannot be determined
+     * the identity remapper is used (the file was written by this mod before
+     * the epoch was tracked, so it matches the live registry).
+     *
+     * @throws IOException when the file's epoch is known but its manifest is
+     *     gone: the chain cannot be extended safely, and appending new-registry
+     *     atoms to it would corrupt the history
+     */
+    private RegistryRemapper remapperFor(Path backupPath) throws IOException {
+        RegistrySnapshot live = liveSnapshot();
+        String fingerprint = EpochSidecar.read(backupPath);
+        if (fingerprint == null || fingerprint.equals(live.fingerprint())) {
+            return RegistryRemapper.identity();
+        }
+        RegistryManifest stored;
+        try {
+            stored = RegistryManifest.read(config.outputDirectory(), fingerprint);
+        } catch (IOException e) {
+            throw new IOException("no registry manifest for epoch " + fingerprint
+                    + " — " + backupPath.getFileName() + " was written under a different Minecraft "
+                    + "or mod version and cannot be extended without corrupting its history", e);
+        }
+        RegistryRemapper remapper = RegistryRemapper.from(stored, live);
+        if (!remapper.isIdentity()) {
+            LOGGER.info("region file {} was written under a different registry — "
+                    + "its block IDs will be translated to the current one", backupPath.getFileName());
+        }
+        return remapper;
+    }
+
+    /** Records the registry epoch a backup file was written under. */
+    private void recordEpoch(Path backupPath) {
+        EpochSidecar.write(backupPath, liveSnapshot().fingerprint());
+    }
 
     /** Runs a full incremental backup across all supported dimensions. */
     public Result runBackup() throws IOException {
@@ -325,7 +643,38 @@ public final class BackupService {
             throw new StoreBusyException("Another backup or prune is already running");
         }
         try {
-            return runBackupLocked();
+            Result result = runBackupLocked();
+            lastBackupAt.set(System.currentTimeMillis() / 1000);
+            consecutiveFailures.set(0);
+            return result;
+        } catch (IOException | RuntimeException e) {
+            consecutiveFailures.incrementAndGet();
+            throw e;
+        } finally {
+            mutationLock.unlock();
+        }
+    }
+
+    /**
+     * The final backup taken while the server shuts down.
+     *
+     * <p>Unlike {@link #runBackup()}, this <em>waits</em> for the store
+     * instead of failing when it is busy: the shutdown is the last chance to
+     * capture the state, and the alternative is losing it entirely.
+     *
+     * <p>Must be called from the server thread (the SERVER_STOPPING event
+     * fires there).
+     */
+    public Result runFinalBackup() throws IOException {
+        mutationLock.lock();
+        try {
+            Result result = runBackupLocked();
+            lastBackupAt.set(System.currentTimeMillis() / 1000);
+            consecutiveFailures.set(0);
+            return result;
+        } catch (IOException | RuntimeException e) {
+            consecutiveFailures.incrementAndGet();
+            throw e;
         } finally {
             mutationLock.unlock();
         }
@@ -333,6 +682,9 @@ public final class BackupService {
 
     private Result runBackupLocked() throws IOException {
         long start = System.currentTimeMillis();
+        // The biome registry is dynamic (a datapack reload shifts its IDs), so
+        // the registry epoch is captured fresh for every run.
+        resetRegistrySnapshot();
         flushWorldSave();
         Path worldRoot = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
         Files.createDirectories(config.outputDirectory());
@@ -340,9 +692,11 @@ public final class BackupService {
         // than chain head) must be consistent across all region files.
         long backupTimestamp = Instant.now().getEpochSecond();
 
-        record RegionTask(DimensionMapping mapping, Path mca, int rx, int rz) {}
         List<RegionTask> tasks = new ArrayList<>();
         for (DimensionMapping mapping : DimensionMapping.values()) {
+            if (!config.includesDimension(mapping.dimension().directoryName)) {
+                continue;
+            }
             // 26.x layout: world/dimensions/<ns>/<path>/region — resolved via the
             // vanilla API rather than hardcoded directory names.
             Path regionDir = net.minecraft.world.level.dimension.DimensionType
@@ -370,6 +724,7 @@ public final class BackupService {
         long changed = 0;
         long inserted = 0;
         int regionsSkipped = 0;
+        int regionsFailed = 0;
         List<RegionTask> wave = new ArrayList<>(tasks);
         for (int waveIndex = 0; waveIndex < MAX_BACKUP_WAVES && !wave.isEmpty(); waveIndex++) {
             if (waveIndex > 0) {
@@ -389,11 +744,14 @@ public final class BackupService {
             }
             List<RegionTask> stillUnstable = new ArrayList<>();
             for (int i = 0; i < futures.size(); i++) {
-                RegionOutcome outcome = await(futures.get(i), "Backup");
+                RegionOutcome outcome = awaitRegion(futures.get(i), wave.get(i));
                 changed += outcome.changed();
                 inserted += outcome.inserted();
                 if (outcome.skipped()) {
                     stillUnstable.add(wave.get(i));
+                }
+                if (outcome.failed()) {
+                    regionsFailed++;
                 }
             }
             regionsSkipped = stillUnstable.size();
@@ -407,7 +765,35 @@ public final class BackupService {
             pruned = prune(config.retentionDays()).chunksChanged();
         }
         return new Result(tasks.size(), (int) changed, (int) inserted, blobsStored, pruned,
-                regionsSkipped, System.currentTimeMillis() - start);
+                regionsSkipped, regionsFailed, System.currentTimeMillis() - start);
+    }
+
+    /** One region file to back up: its world path and its region coordinates. */
+    private record RegionTask(DimensionMapping mapping, Path mca, int rx, int rz) {}
+
+    /**
+     * Awaits one region's backup, isolating its failure.
+     *
+     * <p>Regions are independent, so one corrupt or unreadable region file must
+     * not abort the whole backup — the other regions' data is already written
+     * and would be lost if the run aborted. A failed region is reported and
+     * the backup continues.
+     */
+    private RegionOutcome awaitRegion(Future<RegionOutcome> future, RegionTask task) {
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("backup interrupted", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            LOGGER.error("backup of region {}/{} failed: {}", task.mapping().dimension().directoryName,
+                    task.rx() + "." + task.rz(), cause.toString());
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            return RegionOutcome.error();
+        }
     }
 
     /**
@@ -422,6 +808,18 @@ public final class BackupService {
      * itself still never writes to the world folder — vanilla does.
      */
     private void flushWorldSave() throws IOException {
+        if (server.isSameThread()) {
+            // Already on the server thread (the shutdown backup runs from the
+            // SERVER_STOPPING event, which fires on it). Hopping through
+            // server.execute() would queue the save and wait for a thread that
+            // is blocked right here — save inline instead.
+            try {
+                server.saveEverything(true, true, false);
+            } catch (RuntimeException e) {
+                LOGGER.warn("Pre-backup save failed; backing up the last saved state", e);
+            }
+            return;
+        }
         CompletableFuture<Void> flushed = new CompletableFuture<>();
         server.execute(() -> {
             try {
@@ -614,7 +1012,7 @@ public final class BackupService {
             pruned += await(future, "Prune");
         }
         pruned += FileBlobStore.open(config.outputDirectory()).prune(cutoff);
-        return new Result(files.size(), (int) pruned, 0, 0, 0, 0,
+        return new Result(files.size(), (int) pruned, 0, 0, 0, 0, 0,
                 System.currentTimeMillis() - start);
     }
 
@@ -666,13 +1064,20 @@ public final class BackupService {
             zvcr = new ZvcrFile(BackupConfig.PROTOCOL_VERSION, mapping.dimension);
         }
 
+        // The atoms in the chain are registry IDs. If the registry changed
+        // since the file was written (MC update, mod added/removed), the stored
+        // IDs no longer mean the same blocks. Translating them through the old
+        // epoch's manifest keeps the chain coherent with the live registry.
+        RegistryRemapper remapper = remapperFor(backupPath);
+        remapper.remapFile(zvcr);
+
         ChunkExtractor extractor = new ChunkExtractor(
                 server.registryAccess().lookupOrThrow(net.minecraft.core.registries.Registries.BIOME));
 
         for (int attempt = 1; attempt <= MAX_REGION_READ_ATTEMPTS; attempt++) {
             Map<Long, RegionScanner.ScannedChunk> snapshot = RegionScanner.scan(mca);
             if (snapshot.isEmpty()) {
-                return new RegionOutcome(0, 0, false);
+                return RegionOutcome.ok(0, 0);
             }
             long lengthAtScan = Files.size(mca);
             java.nio.file.attribute.FileTime mtimeAtScan = Files.getLastModifiedTime(mca);
@@ -688,7 +1093,7 @@ public final class BackupService {
                 }
             }
             if (changedChunks.isEmpty()) {
-                return new RegionOutcome(0, 0, false);
+                return RegionOutcome.ok(0, 0);
             }
 
             // Read phase — results are buffered; nothing reaches the store
@@ -751,10 +1156,11 @@ public final class BackupService {
                 }
                 if (inserted > 0 || !Files.exists(backupPath)) {
                     ZvcrFiles.atomicWrite(backupPath,
-                            ZvcrWriter.serialize(zvcr, ZstdCodec.COMPRESSION_LEVEL_FAST));
+                            ZvcrWriter.serialize(zvcr, config.compressionLevel()));
                     TimestampSidecar.write(backupPath, TimestampSidecar.collect(zvcr));
+                    recordEpoch(backupPath);
                 }
-                return new RegionOutcome(changedChunks.size(), inserted, false);
+                return RegionOutcome.ok(changedChunks.size(), inserted);
             }
             if (attempt < MAX_REGION_READ_ATTEMPTS) {
                 LOGGER.warn("r.{}:{} changed while being read (attempt {}/{}) — retrying",
@@ -767,7 +1173,7 @@ public final class BackupService {
         }
         LOGGER.warn("r.{}:{} kept changing while being read — skipped this backup round; "
                 + "the next backup will pick it up", rx, rz);
-        return new RegionOutcome(0, 0, true);
+        return RegionOutcome.unstable();
     }
 
     /**

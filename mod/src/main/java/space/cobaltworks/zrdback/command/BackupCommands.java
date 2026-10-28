@@ -16,11 +16,15 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
 package space.cobaltworks.zrdback.command;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -31,12 +35,18 @@ import net.minecraft.server.MinecraftServer;
 
 import java.nio.file.Path;
 
+import space.cobaltworks.zvcr.region.Dimension;
 import space.cobaltworks.zrdback.backup.BackupService;
+import space.cobaltworks.zrdback.backup.RestoreOptions;
 import space.cobaltworks.zrdback.backup.WorldRestorer;
+import space.cobaltworks.zrdback.store.StoreVerifier;
 
 /**
- * {@code /backup now | prune <days> | status} — moderator level required.
- * Backup runs execute on the caller's executor (async); commands only enqueue.
+ * {@code /zrdback now | prune | restore | list | diff | verify | status} —
+ * moderator level required.
+ *
+ * <p>Backup runs execute on the caller's executor (async); commands only
+ * enqueue.
  */
 public final class BackupCommands {
 
@@ -75,6 +85,10 @@ public final class BackupCommands {
                                 message += "; " + result.regionsSkipped()
                                         + " region(s) skipped (world was being modified) — run again once chunk generation settles";
                             }
+                            if (result.regionsFailed() > 0) {
+                                message += "; " + result.regionsFailed()
+                                        + " region(s) FAILED (corrupt or unreadable) — check the log";
+                            }
                             return message;
                         })))
                 .then(Commands.literal("prune")
@@ -91,13 +105,71 @@ public final class BackupCommands {
                 .then(Commands.literal("restore")
                         .then(Commands.literal("latest").executes(context ->
                                 run(context.getSource(), serviceSupplier, "Restore started", service ->
-                                        restoreMessage(service.restore(java.time.Instant.now().getEpochSecond())))))
+                                        restoreMessage(service.restore(java.time.Instant.now().getEpochSecond(),
+                                                RestoreOptions.all())))))
                         .then(Commands.argument("timestamp", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
                                 .executes(context -> {
                                     long ts = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "timestamp");
                                     return run(context.getSource(), serviceSupplier, "Restore started", service ->
-                                            restoreMessage(service.restore(ts)));
-                                })))
+                                            restoreMessage(service.restore(ts, RestoreOptions.all())));
+                                })
+                                // Partial restores: --dimension <name>, --files-only,
+                                // --player <name>
+                                .then(Commands.literal("dimension")
+                                        .then(Commands.argument("name", com.mojang.brigadier.arguments.StringArgumentType.word())
+                                                .executes(context -> {
+                                                    String name = com.mojang.brigadier.arguments.StringArgumentType.getString(context, "name");
+                                                    long ts = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "timestamp");
+                                                    return run(context.getSource(), serviceSupplier, "Restore started", service -> {
+                                                        Dimension dimension = RestoreOptions.parseDimension(name);
+                                                        return restoreMessage(service.restore(ts,
+                                                                RestoreOptions.chunksOnly(Set.of(dimension))));
+                                                    });
+                                                })))
+                                .then(Commands.literal("files-only")
+                                        .executes(context -> {
+                                            long ts = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "timestamp");
+                                            return run(context.getSource(), serviceSupplier, "Restore started", service ->
+                                                    restoreMessage(service.restore(ts, RestoreOptions.filesOnly())));
+                                        }))
+                                .then(Commands.literal("player")
+                                        .then(Commands.argument("name", com.mojang.brigadier.arguments.StringArgumentType.word())
+                                                .executes(context -> {
+                                                    String name = com.mojang.brigadier.arguments.StringArgumentType.getString(context, "name");
+                                                    long ts = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "timestamp");
+                                                    return run(context.getSource(), serviceSupplier, "Restore started", service ->
+                                                            restoreMessage(service.restore(ts, RestoreOptions.playerDataOnly(name))));
+                                                })))))
+                .then(Commands.literal("diff")
+                        .then(Commands.argument("older", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                .then(Commands.argument("newer", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                        .executes(context -> {
+                                            long older = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "older");
+                                            long newer = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "newer");
+                                            return run(context.getSource(), serviceSupplier, "Diff started", service -> {
+                                                BackupService.Diff diff = service.diff(older, newer);
+                                                return "Diff " + older + " -> " + newer + ": "
+                                                        + diff.chunksChanged() + " chunk(s) changed, "
+                                                        + diff.chunksOnlyInNew() + " only in the newer point, "
+                                                        + diff.chunksOnlyInOld() + " only in the older point, "
+                                                        + diff.filesChanged() + " file(s) changed ("
+                                                        + diff.durationMs() + " ms)";
+                                            });
+                                        }))))
+                .then(Commands.literal("verify").executes(context ->
+                        run(context.getSource(), serviceSupplier, "Verify started", service -> {
+                            StoreVerifier.Report report = StoreVerifier.verify(service.outputDirectory());
+                            if (report.ok()) {
+                                return "Verify OK: " + report.filesChecked() + " region file(s), "
+                                        + report.chunksChecked() + " chunk(s) consistent";
+                            }
+                            StringBuilder sb = new StringBuilder("Verify found "
+                                    + report.problems().size() + " problem(s):");
+                            for (StoreVerifier.Problem problem : report.problems()) {
+                                sb.append("\n  ").append(problem);
+                            }
+                            return sb.toString();
+                        })))
                 .then(Commands.literal("stats").executes(context ->
                         run(context.getSource(), serviceSupplier, "Stats started", service -> {
                             BackupService.Stats s = service.stats();
@@ -153,6 +225,14 @@ public final class BackupCommands {
         if (result.chunksSkipped() > 0) {
             message += "; " + result.chunksSkipped()
                     + " chunks had no data at this timestamp and were skipped";
+        }
+        if (result.missingBlocks() > 0) {
+            message += "; " + result.missingBlocks()
+                    + " block(s) no longer exist in this Minecraft version and became air";
+        }
+        if (result.missingBiomes() > 0) {
+            message += "; " + result.missingBiomes()
+                    + " biome(s) no longer exist in this Minecraft version";
         }
         return message;
     }

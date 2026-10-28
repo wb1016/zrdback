@@ -16,7 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
 package space.cobaltworks.zvcr.format;
 
@@ -92,6 +92,16 @@ public final class PackedDeltaData {
     /** Read-only view of the chain, newest first. */
     public List<PackedSnapshot> reverseDeltas() {
         return List.copyOf(reverseDeltas);
+    }
+
+    /**
+     * Replaces the whole chain (used by the deserializer and by the registry
+     * remapper, which rewrites every entry in place).
+     */
+    public void replaceAll(List<PackedSnapshot> snapshots) {
+        reverseDeltas.clear();
+        reverseDeltas.addAll(snapshots);
+        deltasSinceFullCache = null;
     }
 
     /**

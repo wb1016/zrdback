@@ -9,4 +9,6 @@ pluginManagement {
 rootProject.name = 'zvcr-backup'
 
 include 'zvcr-java'
+include 'zrdback-store'
 include 'mod'
+include 'cli'

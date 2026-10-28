@@ -16,9 +16,9 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
- * by crane are licensed under the GNU Lesser General Public License v3.
+ * by crayne are licensed under the GNU Lesser General Public License v3.
  */
-package space.cobaltworks.zrdback.backup;
+package space.cobaltworks.zrdback.store;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -145,8 +145,24 @@ public final class FileBlobStore {
      * @return number of files restored
      */
     public int restore(long timestamp, Path targetDir) throws IOException {
+        return restore(timestamp, targetDir, null);
+    }
+
+    /**
+     * Restores the tracked files as of {@code timestamp}, optionally
+     * restricted to the paths matching {@code pathFilter}.
+     *
+     * @param pathFilter a case-insensitive substring the world-relative path
+     *     must contain, or {@code null} to restore everything
+     * @return number of files restored
+     */
+    public int restore(long timestamp, Path targetDir, String pathFilter) throws IOException {
         int restored = 0;
+        String needle = pathFilter == null ? null : pathFilter.toLowerCase(java.util.Locale.ROOT);
         for (Map.Entry<String, List<Entry>> file : index.files.entrySet()) {
+            if (needle != null && !file.getKey().toLowerCase(java.util.Locale.ROOT).contains(needle)) {
+                continue;
+            }
             Entry best = null;
             for (Entry entry : file.getValue()) {
                 if (entry.timestamp() <= timestamp && (best == null || entry.timestamp() > best.timestamp())) {
@@ -206,6 +222,11 @@ public final class FileBlobStore {
     /** Number of tracked files. */
     public int trackedFileCount() {
         return index.files.size();
+    }
+
+    /** The per-file history of every tracked file, keyed by world-relative path. */
+    public Map<String, List<Entry>> trackedEntries() {
+        return Map.copyOf(index.files);
     }
 
     /**

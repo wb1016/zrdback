@@ -1,0 +1,28 @@
+plugins {
+    id 'application'
+}
+
+base {
+    archivesName = 'zrdback-cli'
+    version = mod_version
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation project(':zrdback-store')
+    implementation "com.google.code.gson:gson:${gson_version}"
+}
+
+application {
+    mainClass = 'space.cobaltworks.zrdback.cli.ZrdBackCli'
+    applicationName = 'zrdback-cli'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs << "-Xlint:deprecation"
+    options.encoding = 'UTF-8'
+    options.release = Integer.parseInt(project.java_version)
+}
