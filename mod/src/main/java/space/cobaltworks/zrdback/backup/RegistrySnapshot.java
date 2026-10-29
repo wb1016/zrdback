@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -47,7 +47,7 @@ import space.cobaltworks.zrdback.store.RegistryManifest;
  * and an old backup would then restore the <em>wrong blocks</em> while still
  * looking perfectly valid.
  *
- * <p>The mod therefore records the ID → canonical name mapping of the registry
+ * <p>The mod therefore records the ID -> canonical name mapping of the registry
  * it backed up against ({@link RegistryManifest}) and translates stored IDs
  * through it when the live registry no longer matches.
  */
@@ -61,7 +61,7 @@ public final class RegistrySnapshot {
 
     private final RegistryManifest manifest;
 
-    /** name → ID, for translating a stored name into the current registry. */
+    /** name -> ID, for translating a stored name into the current registry. */
     private final Map<String, Integer> blockIdsByName;
     private final Map<String, Integer> biomeIdsByName;
 
@@ -118,7 +118,7 @@ public final class RegistrySnapshot {
     }
 
     /**
-     * The registry ID of air — the fallback for blocks that no longer exist.
+     * The registry ID of air. the fallback for blocks that no longer exist.
      *
      * <p>Air keeps the position's shape without silently substituting a
      * different block for the missing one.
@@ -127,7 +127,7 @@ public final class RegistrySnapshot {
         return blockId("minecraft:air");
     }
 
-    /** The registry ID of the plains biome — the fallback for missing biomes. */
+    /** The registry ID of the plains biome. the fallback for missing biomes. */
     public int plainsId() {
         int plains = biomeId("minecraft:plains");
         return plains < 0 ? 0 : plains;

@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -31,8 +31,8 @@ import space.cobaltworks.zvcr.format.DeltaInsertionResult;
  * {@code DeltaTileEntityData}.
  *
  * <p>Entry 0 is the latest snapshot: every present TE is a {@code put}. Older
- * entries are reverse deltas: a TE absent before → {@code erase}; a TE that
- * existed with different NBT → {@code put(old TE)}; unchanged TEs are excluded.
+ * entries are reverse deltas: a TE absent before -> {@code erase}; a TE that
+ * existed with different NBT -> {@code put(old TE)}; unchanged TEs are excluded.
  */
 public final class TileEntityHistory {
 
@@ -69,9 +69,9 @@ public final class TileEntityHistory {
     }
 
     /**
-     * Newest TE list whose timestamp is ≤ {@code timestamp}: start from the
+     * Newest TE list whose timestamp is <= {@code timestamp}: start from the
      * latest snapshot's put entries, then apply older deltas in order (put
-     * overwrites, erase removes), stopping once the entry's timestamp ≤ query.
+     * overwrites, erase removes), stopping once the entry's timestamp <= query.
      */
     public Optional<Map<TileEntityPosition, TileEntity>> snapshotBefore(long timestamp) {
         Optional<TileEntityListDelta> latestOpt = latestSnapshot();

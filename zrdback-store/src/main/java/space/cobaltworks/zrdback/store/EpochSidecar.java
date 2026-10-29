@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,7 +35,7 @@ import java.nio.file.Path;
  *
  * <p>The sidecar is written next to the file it describes, so it stays valid
  * when the file is rewritten (a prune rewrite keeps the atoms, hence the
- * epoch). A missing sidecar means the epoch is unknown — the caller then
+ * epoch). A missing sidecar means the epoch is unknown, the caller then
  * falls back to the protocol version recorded in the file header.
  */
 public final class EpochSidecar {
@@ -76,7 +76,7 @@ public final class EpochSidecar {
         try {
             Files.writeString(sidecarPath(zvcrPath), fingerprint, StandardCharsets.UTF_8);
         } catch (IOException e) {
-            // advisory metadata — a missing sidecar only costs remapping accuracy
+            // advisory metadata, a missing sidecar only costs remapping accuracy
         }
     }
 }

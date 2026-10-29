@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -34,26 +34,26 @@ import space.cobaltworks.zrdback.store.StoreFormat;
  * Minimal config surface (v1): {@code config/zrdback.properties}.
  *
  * <ul>
- *   <li>{@code output-directory} — backup storage root; empty = sibling
+ *   <li>{@code output-directory} - backup storage root; empty = sibling
  *       {@code zrdback-backups} directory next to the world save (the world save
  *       folder itself is never written to). On an integrated server
  *       (singleplayer/LAN) the store is scoped per save:
  *       {@code <root>/<world-folder-name>/}, because the world save's parent is
  *       the shared {@code saves/} directory of the whole instance.</li>
- *   <li>{@code interval-minutes} — hourly cadence by default.</li>
- *   <li>{@code checkpoint-interval} — full snapshot every N deltas per chain.</li>
- *   <li>{@code retention-days} — drop history older than N days; 0 = keep
+ *   <li>{@code interval-minutes} - hourly cadence by default.</li>
+ *   <li>{@code checkpoint-interval} - full snapshot every N deltas per chain.</li>
+ *   <li>{@code retention-days} - drop history older than N days; 0 = keep
  *       forever. The chain is continuous, so retention only ever removes
- *       the oldest snapshots — it never creates a second chain.</li>
- *   <li>{@code threads} — worker threads for backup/prune; 0 = auto (half the
+ *       the oldest snapshots - it never creates a second chain.</li>
+ *   <li>{@code threads} - worker threads for backup/prune; 0 = auto (half the
  *       cores, min 1). Workers run at minimum priority so ticks are served
  *       first. Region files are independent, so they process in parallel.</li>
- *   <li>{@code backup-on-stop} — run a final backup while the server shuts
+ *   <li>{@code backup-on-stop} - run a final backup while the server shuts
  *       down, capturing the state that the exit save would otherwise leave
  *       behind.</li>
- *   <li>{@code compression-level} — Zstd level for incremental backups
+ *   <li>{@code compression-level} - Zstd level for incremental backups
  *       (1..19, default 4). Prune rewrites always use level 8.</li>
- *   <li>{@code dimensions} — comma-separated dimensions to back up
+ *   <li>{@code dimensions} - comma-separated dimensions to back up
  *       ({@code overworld,nether,end}); empty = all.</li>
  * </ul>
  */
@@ -140,7 +140,7 @@ public final class BackupConfig {
      * <p>A dedicated server hosts exactly one world, so the base is used as-is
      * (flat layout, compatible with existing server stores). An integrated
      * server (singleplayer/LAN) shares one {@code saves/} directory across all
-     * worlds of the instance — without scoping, every save's backups would mix
+     * worlds of the instance - without scoping, every save's backups would mix
      * into one store and prune/retention/restore would hit other saves' data.
      */
     static Path resolveStoreRoot(Path base, Path normalizedWorldRoot, boolean dedicatedServer) {

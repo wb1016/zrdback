@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -132,11 +132,32 @@ class FileBlobStoreTest {
         int removed = store.prune(2500); // drop entries older than 2500, keep newest
         assertEquals(2, removed);
         assertEquals(1, store.blobCount()); // GC removed both unreferenced blobs
-        store.flush();
 
         // newest entry survives pruning
         Path target = tmp.resolve("restore");
         assertEquals(1, store.restore(9999, target));
         assertTrue(Arrays.equals(new byte[] {3}, Files.readAllBytes(target.resolve("f.dat"))));
+    }
+
+    @Test
+    void pruneLeavesTheIndexConsistentWithTheBlobsOnDisk(@TempDir Path tmp) throws Exception {
+        // Regression: prune used to delete the blobs of the dropped history
+        // entries but persist the *unpruned* index, so the index referenced
+        // blobs that no longer existed.
+        Path world = tmp.resolve("world");
+        Path backup = tmp.resolve("backups");
+        write(world.resolve("level.dat"), new byte[] {1, 2, 3});
+        FileBlobStore store = FileBlobStore.open(backup);
+        store.store(world, "level.dat", 1000);
+        write(world.resolve("level.dat"), new byte[] {4, 5, 6});
+        store.store(world, "level.dat", 2000);
+        store.flush();
+        assertEquals(2, store.blobCount());
+
+        // prune with a cutoff between the two entries
+        StorePruner.prune(backup, 1500, false);
+
+        StoreVerifier.Report report = StoreVerifier.verify(backup);
+        assertTrue(report.ok(), () -> "store inconsistent after prune: " + report.problems());
     }
 }

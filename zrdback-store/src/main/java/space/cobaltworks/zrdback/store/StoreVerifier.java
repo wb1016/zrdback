@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -117,7 +117,7 @@ public final class StoreVerifier {
         if (zvcr.protocolVersion != space.cobaltworks.zrdback.store.StoreFormat.PROTOCOL_VERSION) {
             problems.add(new Problem(where, "protocol version " + zvcr.protocolVersion
                     + " differs from the expected " + StoreFormat.PROTOCOL_VERSION
-                    + " — restore would map block IDs incorrectly"));
+                    + " ; restore would map block IDs incorrectly"));
         }
 
         for (int i = 0; i < space.cobaltworks.zvcr.Zvcr.SEGMENTS_PER_REGION; i++) {
@@ -202,7 +202,7 @@ public final class StoreVerifier {
                 String hash = name.substring(0, name.length() - 4);
                 if (!referenced.containsKey(hash)) {
                     problems.add(new Problem(StoreLayout.BLOBS_DIRECTORY + "/" + name,
-                            "orphan blob — not referenced by the index"));
+                            "orphan blob; not referenced by the index"));
                 }
             }
         } catch (IOException e) {
@@ -214,7 +214,37 @@ public final class StoreVerifier {
             if (!Files.isRegularFile(path)) {
                 problems.add(new Problem(StoreLayout.INDEX_FILE,
                         "missing blob " + blob.getKey() + " (referenced " + blob.getValue() + "×)"));
+                continue;
             }
+            // The blob name is the hash of the *uncompressed* content, so a
+            // truncated or corrupt blob still has the right name. Check that
+            // it actually decompresses.
+            try {
+                byte[] content = space.cobaltworks.zvcr.io.ZstdCodec.decompress(Files.readAllBytes(path));
+                String actual = sha256Hex(content);
+                if (!actual.equals(blob.getKey())) {
+                    problems.add(new Problem(StoreLayout.BLOBS_DIRECTORY + "/" + blob.getKey() + ".zst",
+                            "corrupt blob; content hashes to " + actual));
+                }
+            } catch (IOException | RuntimeException e) {
+                problems.add(new Problem(StoreLayout.BLOBS_DIRECTORY + "/" + blob.getKey() + ".zst",
+                        "unreadable: " + e));
+            }
+        }
+    }
+
+    /** SHA-256 of the given bytes, lowercase hex. */
+    private static String sha256Hex(byte[] content) {
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(content);
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required but unavailable", e);
         }
     }
 }

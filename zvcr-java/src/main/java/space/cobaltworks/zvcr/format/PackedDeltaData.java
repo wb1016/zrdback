@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -38,7 +38,7 @@ import space.cobaltworks.zvcr.Zvcr;
  *
  * <p>Reconstruction of the state before timestamp T: unpack the latest, then
  * apply every following entry in order (overwriting all atoms ≠ 0xFFFF),
- * stopping once the entry's timestamp ≤ T.
+ * stopping once the entry's timestamp <= T.
  *
  * <p><strong>Checkpoint trick:</strong> a full snapshot inserted mid-chain is
  * indistinguishable from a delta to readers and reconstructs correctly, because
@@ -123,7 +123,7 @@ public final class PackedDeltaData {
     }
 
     /**
-     * Number of consecutive non-full entries after the head — the distance to
+     * Number of consecutive non-full entries after the head, the distance to
      * the newest full snapshot behind it, i.e. the value the checkpoint policy
      * compares against {@code checkpointInterval}. O(chain) on first call per
      * chain (and after deserialization), O(1) on subsequent inserts.
@@ -164,7 +164,7 @@ public final class PackedDeltaData {
     }
 
     /**
-     * Reconstructs the newest state whose timestamp is ≤ {@code timestamp}.
+     * Reconstructs the newest state whose timestamp is <= {@code timestamp}.
      * Returns empty if the chain is empty.
      */
     public Optional<int[]> snapshotBefore(long timestamp) {
@@ -208,7 +208,7 @@ public final class PackedDeltaData {
      *   <li>{@code timestamp <= latest.timestamp}: rejected
      *       ({@link Status#SNAPSHOT_OLDER_THAN_LATEST}).</li>
      *   <li>No atom differs from the latest: rejected
-     *       ({@link Status#NO_CHANGES_MADE}) — a zero-change delta is never
+     *       ({@link Status#NO_CHANGES_MADE}), a zero-change delta is never
      *       stored.</li>
      * </ul>
      */
@@ -293,7 +293,7 @@ public final class PackedDeltaData {
                 // the head now ends at index-1 (or earlier, if it already did).
                 deltasSinceFullCache = Math.min(deltasSinceFullCache, index - 1);
             } else {
-                deltasSinceFullCache = null; // degenerate (0xFFFF in data) — re-derive
+                deltasSinceFullCache = null; // degenerate (0xFFFF in data), re-derive
             }
         }
     }

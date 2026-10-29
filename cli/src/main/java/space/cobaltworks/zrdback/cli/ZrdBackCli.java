@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -57,21 +57,51 @@ public final class ZrdBackCli {
         } catch (IOException e) {
             System.err.println("error: " + e.getMessage());
             System.exit(1);
-        } catch (IllegalArgumentException e) {
-            System.err.println("error: " + e.getMessage());
-            System.err.println();
-            usage(System.err);
-            System.exit(2);
         }
     }
 
     static int run(String[] args) throws IOException {
+        try {
+            return dispatch(args);
+        } catch (IllegalArgumentException e) {
+            // A usage error, not a store problem.
+            System.err.println("error: " + e.getMessage());
+            System.err.println();
+            usage(System.err);
+            return 2;
+        }
+    }
+
+    private static int dispatch(String[] args) throws IOException {
         if (args.length == 0) {
             usage(System.err);
             return 2;
         }
         String command = args[0];
         List<String> rest = new ArrayList<>(List.of(args).subList(1, args.length));
+
+        // help and unknown commands must be reported without requiring a
+        // store to exist
+        switch (command) {
+            case "help", "--help", "-h" -> {
+                usage(System.out);
+                return 0;
+            }
+            case "list", "stats", "verify", "prune" -> {
+                // handled below
+            }
+            default -> {
+                System.err.println("error: unknown command '" + command + "'");
+                usage(System.err);
+                return 2;
+            }
+        }
+
+        // Validate the command's own options before touching the store, so
+        // a usage error does not depend on a store being present.
+        if (command.equals("prune") && option(rest, "--days").isEmpty()) {
+            throw new IllegalArgumentException("prune requires --days N");
+        }
 
         Path store = option(rest, "--store").map(Path::of).orElse(Path.of(DEFAULT_STORE));
         if (!Files.isDirectory(store)) {
@@ -91,17 +121,8 @@ public final class ZrdBackCli {
             case "verify" -> {
                 return verify(store);
             }
-            case "prune" -> {
-                return prune(store, rest);
-            }
-            case "help", "--help", "-h" -> {
-                usage(System.out);
-                return 0;
-            }
             default -> {
-                System.err.println("error: unknown command '" + command + "'");
-                usage(System.err);
-                return 2;
+                return prune(store, rest);
             }
         }
     }
@@ -151,7 +172,7 @@ public final class ZrdBackCli {
         System.out.println("checked " + report.filesChecked() + " region file(s), "
                 + report.chunksChecked() + " chunk(s)");
         if (report.ok()) {
-            System.out.println("OK — the store is consistent");
+            System.out.println("OK: the store is consistent");
             return 0;
         }
         System.out.println(report.problems().size() + " problem(s) found:");
@@ -166,7 +187,12 @@ public final class ZrdBackCli {
         if (daysOption == null) {
             throw new IllegalArgumentException("prune requires --days N");
         }
-        int days = Integer.parseInt(daysOption);
+        int days;
+        try {
+            days = Integer.parseInt(daysOption);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("--days must be a number, got '" + daysOption + "'");
+        }
         boolean dryRun = args.contains("--dry-run");
         long cutoff = System.currentTimeMillis() / 1000 - days * 86400L;
 

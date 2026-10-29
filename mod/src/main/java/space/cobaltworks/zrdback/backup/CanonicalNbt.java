@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,7 +33,7 @@ import net.minecraft.nbt.Tag;
  * C++ reference (mc_cpp {@code writeWithType}):
  *
  * <ul>
- *   <li>type byte + payload — <strong>no root name</strong></li>
+ *   <li>type byte + payload - <strong>no root name</strong></li>
  *   <li>compound keys sorted alphabetically (the reference compares raw NBT
  *       bytes for equality, so key order must be canonical)</li>
  *   <li>big-endian numbers, modified UTF-8 strings (Java's

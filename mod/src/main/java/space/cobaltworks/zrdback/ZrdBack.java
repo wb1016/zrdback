@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -95,7 +95,7 @@ public final class ZrdBack implements ModInitializer {
      * Runs a scheduled backup.
      *
      * <p>A store that is busy (a manual backup or prune is running) must not
-     * silently skip the interval — the next backup would then be a full
+     * silently skip the interval. the next backup would then be a full
      * interval later and the window would silently widen. Instead the pass is
      * retried shortly, and only a persistently busy store gives up.
      */
@@ -117,7 +117,7 @@ public final class ZrdBack implements ModInitializer {
             scheduleRetry(service);
         } catch (Throwable e) {
             // Throwable: a scheduled task that throws is silently cancelled by
-            // the executor — log Errors too.
+            // the executor. log Errors too.
             LOGGER.error("Scheduled backup failed", e);
         }
     }
@@ -136,7 +136,7 @@ public final class ZrdBack implements ModInitializer {
      * (players, last edits) is captured instead of waiting for the next
      * scheduled pass.
      *
-     * <p>Fires on the server thread, at the head of {@code stopServer()} — the
+     * <p>Fires on the server thread, at the head of {@code stopServer()}. the
      * world is still fully loaded and writable, and the pre-backup save runs
      * inline.
      */
@@ -148,7 +148,7 @@ public final class ZrdBack implements ModInitializer {
         if (!SHUTDOWN_BACKUP_DONE.compareAndSet(false, true)) {
             return;
         }
-        LOGGER.info("Server stopping — running the final backup");
+        LOGGER.info("Server stopping: running the final backup");
         try {
             BackupService.Result result = service.runFinalBackup();
             LOGGER.info("Final backup: {} regions scanned, {} chunks changed, {} inserted ({} ms)",

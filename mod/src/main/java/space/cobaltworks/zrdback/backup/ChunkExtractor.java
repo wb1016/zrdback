@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -50,7 +50,7 @@ import space.cobaltworks.zvcr.region.TileEntityPosition;
  * list with canonical NBT.
  *
  * <p>Disc bit widths follow vanilla's {@code Strategy} rules (blocks: 0 or
- * 4..8, else global; biomes: 0..3, else global) — MC re-normalizes on load, so
+ * 4..8, else global; biomes: 0..3, else global); MC re-normalizes on load, so
  * any valid width may appear and parsing must be generic.
  */
 public final class ChunkExtractor {
@@ -131,7 +131,7 @@ public final class ChunkExtractor {
         // ZVCR stores chunk-LOCAL x/z (uint8) and y relative to the dimension
         // floor (uint16). Masking the world coordinates instead silently
         // wrapped every 256 blocks and mirrored negative chunks to the far
-        // positive side — vanilla then rejected the TEs on restore ("found in
+        // positive side. vanilla then rejected the TEs on restore ("found in
         // a wrong chunk").
         int localX = teTag.getIntOr("x", 0) - chunkX * 16;
         int localZ = teTag.getIntOr("z", 0) - chunkZ * 16;
@@ -184,7 +184,7 @@ public final class ChunkExtractor {
         }
         long[] data = container.getLongArray("data").orElseThrow();
 
-        // Disc data values are ALWAYS indices into the palette list — including
+        // Disc data values are ALWAYS indices into the palette list. including
         // sections vanilla stores with the Global in-memory configuration
         // (>8-bit blocks / >3-bit biomes): PalettedContainer#pack re-encodes
         // into a fresh HashMapPalette and writes every distinct entry, so the
@@ -246,7 +246,7 @@ public final class ChunkExtractor {
      * Reads a blockstate from a palette entry in either disc format: 26.3's
      * {@code {id, properties}} (via the vanilla helper) or the legacy
      * {@code {Name, Properties}} of worlds saved by older versions. The legacy
-     * form matters because vanilla only upgrades chunks it actually loads — a
+     * form matters because vanilla only upgrades chunks it actually loads. a
      * world opened once has most chunks still on disk in the old format, and
      * feeding {@code {Name: ...}} to the 26.3 helper silently yields air.
      */

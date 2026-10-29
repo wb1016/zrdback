@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,7 +26,7 @@ package space.cobaltworks.zvcr.format;
  *
  * <p>{@link Status#NO_CHANGES_MADE} is a common, expected outcome (e.g. chunks
  * whose region-file timestamp advanced without content change) and must be
- * handled cheaply by callers — hence a result type instead of an exception.
+ * handled cheaply by callers, hence a result type instead of an exception.
  */
 public sealed interface DeltaInsertionResult {
 

@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -32,7 +32,7 @@ import space.cobaltworks.zvcr.region.ZvcrFile;
 
 /**
  * File-level read/write helpers. Writes are atomic: temp file in the target
- * directory, fsync, rename, then fsync of the parent directory — stronger than
+ * directory, fsync, rename, then fsync of the parent directory, stronger than
  * the C++ CLI's {@code writeFileSafely} (which skips fsync).
  */
 public final class ZvcrFiles {

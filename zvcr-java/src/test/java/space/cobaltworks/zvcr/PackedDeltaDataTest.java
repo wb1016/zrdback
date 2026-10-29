@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -38,7 +38,7 @@ import space.cobaltworks.zvcr.format.PackedSnapshot;
 
 class PackedDeltaDataTest {
 
-    private static final int SIZE = Zvcr.SECTION_SIZE_BIOMES; // 64 — small and fast
+    private static final int SIZE = Zvcr.SECTION_SIZE_BIOMES; // 64, small and fast
 
     private static int[] uniform(int value) {
         int[] out = new int[SIZE];
@@ -263,7 +263,7 @@ class PackedDeltaDataTest {
 
     /**
      * The incrementally maintained {@code deltasSinceFull} counter must always
-     * agree with a fresh unpack-based scan — the checkpoint policy relies on
+     * agree with a fresh unpack-based scan, the checkpoint policy relies on
      * it, and a drifted counter would only misplace checkpoints.
      */
     @Test

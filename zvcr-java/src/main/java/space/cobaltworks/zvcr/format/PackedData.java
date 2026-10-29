@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -31,7 +31,7 @@ import space.cobaltworks.zvcr.Zvcr;
  * <p>Packing layout (must stay byte-compatible with the C++ reference):
  * <ul>
  *   <li>{@code valuesPerLong = 64 / bitsPerEntry}, entries packed LSB-first</li>
- *   <li>{@code bitsPerEntry}: 4 (palette ≤ 16), 8 (≤ 256), else 16 (direct mode)</li>
+ *   <li>{@code bitsPerEntry}: 4 (palette <= 16), 8 (<= 256), else 16 (direct mode)</li>
  *   <li>Indirect palettes may hold up to 257 entries; the reference implementation
  *       truncates palette indices to 8 bits when building them, so the 257th entry
  *       (index 256) aliases index 0. Replicated here for byte compatibility.</li>
@@ -66,7 +66,7 @@ public sealed interface PackedData permits PackedData.SingleValue, PackedData.Pa
             return packCanonical(sectionData);
         }
 
-        // buildPalette — replicates the C++ exactly, including the uint8 index
+        // buildPalette replicates the C++ exactly, including the uint8 index
         // truncation quirk (palette index 256 aliases 0).
         final boolean[] unique = new boolean[0x10000];
         final int[] indices = new int[0x10000];

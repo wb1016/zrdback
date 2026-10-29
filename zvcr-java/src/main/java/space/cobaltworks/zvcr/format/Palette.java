@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -64,7 +64,7 @@ public record Palette(int[] entries, int bitsPerEntry) {
     /**
      * Bits per entry for a given palette length: 4 bits for 1..=16 unique values,
      * 8 bits for 17..=256, else 16 (direct mode). Rounding to multiples of 4 is
-     * intentional — byte-aligned data compresses better with Zstd.
+     * intentional, byte-aligned data compresses better with Zstd.
      */
     public static int bitsPerEntry(int paletteLength) {
         if (paletteLength <= 16) return 4;

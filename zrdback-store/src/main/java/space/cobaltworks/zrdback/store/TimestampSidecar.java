@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -44,7 +44,7 @@ import space.cobaltworks.zvcr.region.ZvcrFile;
  *
  * <p>The cache is strictly advisory: a missing, stale or corrupt sidecar
  * falls back to a full parse (which repopulates the sidecar), and every
- * sidecar failure is swallowed — it must never break correctness. Freshness
+ * sidecar failure is swallowed, it must never break correctness. Freshness
  * is checked by comparing mtimes (the writer always rewrites the sidecar
  * after the {@code .zvcr3d}) plus the recorded file size.
  */
@@ -124,7 +124,7 @@ public final class TimestampSidecar {
     /**
      * Returns the cached timestamps when the sidecar exists, parses, and is
      * not older than the backup file (mtime + size check); {@code null}
-     * otherwise. Never throws — the cache is advisory.
+     * otherwise. Never throws the cache is advisory.
      */
     private static long[] readIfFresh(Path zvcrPath) {
         Path sidecar = sidecarPath(zvcrPath);
@@ -174,7 +174,7 @@ public final class TimestampSidecar {
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE,
                     StandardOpenOption.TRUNCATE_EXISTING);
         } catch (IOException e) {
-            // advisory cache — ignore
+            // advisory cache, ignore
         }
     }
 

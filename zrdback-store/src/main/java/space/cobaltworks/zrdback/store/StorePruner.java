@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -53,8 +53,11 @@ public final class StorePruner {
             removed += pruneFile(file, cutoff, dryRun);
         }
         if (!dryRun) {
+            // prune() drops the history entries and garbage-collects the
+            // blobs they referenced, then flushes the index itself. Flushing
+            // from a second instance here would write back the *unpruned*
+            // index read from disk and leave it referencing deleted blobs.
             removed += FileBlobStore.open(storeRoot).prune(cutoff);
-            FileBlobStore.open(storeRoot).flush();
         }
         return removed;
     }

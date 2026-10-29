@@ -1,0 +1,3 @@
+[submodule "golden-tool/zvcr"]
+	path = golden-tool/zvcr
+	url = https://github.com/2b2tplace/zvcr.git

@@ -39,4 +39,55 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zrdback-cli
-          path: cli/build/libs/*.jar
+          path: cli/build/libs/*-cli.jar
+
+  # Cross-validate the Java ZVCR-3D port against the C++ reference
+  # implementation (the `zvcr` submodule). The Java writer's uncompressed
+  # container must match the reference's byte for byte.
+  golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '25'
+
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v2
+
+      - name: Build the reference tool
+        run: |
+          cmake -B golden-tool/build -S golden-tool
+          cmake --build golden-tool/build -j
+
+      - name: Generate the reference container
+        run: |
+          golden-tool/build/zvcr_golden gen /tmp/golden.zvcr3d
+          golden-tool/build/zvcr_golden hexdump /tmp/golden.zvcr3d > /tmp/golden.hex
+
+      - name: Compare against the committed golden file
+        run: |
+          diff -u zvcr-java/src/test/resources/golden/golden.hex /tmp/golden.hex
+
+      - name: Run the Java cross-validation test
+        run: ./gradlew :zvcr-java:test --console=plain
+
+  # Server-free tests for the benchmark tooling.
+  bench-tools:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up the Python environment
+        run: bench/setup/setup-python.sh
+
+      - name: Self-test the world comparator
+        run: bench/.venv/bin/python bench/tools/mca_integrity_selftest.py

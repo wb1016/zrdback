@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -79,7 +79,7 @@ import space.cobaltworks.zrdback.BackupConfig;
  * ZVCR-3D chains (blocks, biomes, tile entities) plus the auxiliary files from
  * the blob store (level.dat, players, entities, poi).
  *
- * <p>Restore always writes to a separate target directory — never into the
+ * <p>Restore always writes to a separate target directory, never into the
  * live world save. Restored chunks carry {@code isLightOn=false} and no
  * heightmaps; vanilla recomputes both on load.
  */
@@ -111,7 +111,7 @@ public final class WorldRestorer {
      * <p>Fails with the recorded history range when {@code timestamp} predates
      * every stored state: chains clamp to their oldest entry while the blob
      * store returns nothing, so an out-of-range timestamp would otherwise
-     * silently produce old terrain without level.dat/playerdata — a world that
+     * silently produce old terrain without level.dat/playerdata, a world that
      * vanilla re-seeds on first open.
      */
     public Result restore(long timestamp) throws IOException {
@@ -168,7 +168,7 @@ public final class WorldRestorer {
                     : 0;
 
             if (regions.restored() == 0 && files == 0) {
-                throw new IOException("The last backup captured no chunk data — the world was "
+                throw new IOException("The last backup captured no chunk data. The world was "
                         + "being heavily modified while it ran (e.g. mass chunk generation). "
                         + "Run /zrdback now again once chunk generation has settled, then restore.");
             }
@@ -186,7 +186,7 @@ public final class WorldRestorer {
     private int missingBiomes;
 
     /**
-     * Oldest recorded chunk timestamp across all {@code .zvcr3d} files — the
+     * Oldest recorded chunk timestamp across all {@code .zvcr3d} files, the
      * same value the restore walk used to compute post-hoc, now checked before
      * any target-directory work happens.
      */
@@ -282,7 +282,7 @@ public final class WorldRestorer {
 
         // The stored atoms are registry IDs. If the backup was written under a
         // different registry (MC update, mod added/removed), translate them by
-        // name — otherwise the restore would place the wrong blocks while
+        // name. otherwise the restore would place the wrong blocks while
         // still looking valid.
         remapperFor(zvcrPath).remapFile(zvcr);
 
@@ -345,13 +345,13 @@ public final class WorldRestorer {
             return RegistryRemapper.from(stored, liveSnapshot());
         } catch (IOException e) {
             throw new IOException("no registry manifest for epoch " + fingerprint
-                    + " — " + backupPath.getFileName() + " was written under a different Minecraft "
+                    + ": " + backupPath.getFileName() + " was written under a different Minecraft "
                     + "or mod version and cannot be restored safely", e);
         }
     }
 
     /**
-     * The live registry's ID → name mapping, captured once per restore.
+     * The live registry's ID -> name mapping, captured once per restore.
      *
      * <p>Capturing it walks the whole block-state registry, so it is computed
      * once and reused for every region file.
@@ -473,7 +473,7 @@ public final class WorldRestorer {
         for (int i = 0; i < atoms.length; i++) {
             Holder<Biome> holder = holderIdMap.byId(atoms[i]);
             if (holder == null) {
-                // The biome no longer exists — keep the container's default
+                // The biome no longer exists, keep the container's default
                 // rather than aborting the whole restore.
                 missingBiomes++;
                 continue;

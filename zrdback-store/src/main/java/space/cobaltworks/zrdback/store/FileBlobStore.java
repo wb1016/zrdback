@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -38,17 +38,18 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import space.cobaltworks.zvcr.io.ZstdCodec;
+import space.cobaltworks.zvcr.io.ZvcrFiles;
 
 /**
  * Content-addressed blob store for files ZVCR does not model semantically
- * (entities/, poi/, players/, level.dat — HANDOFF §3.6).
+ * (entities/, poi/, players/, level.dat).
  *
  * <p>Layout under the backup output directory:
  * <ul>
- *   <li>{@code blobs/<sha256-hex>.zst} — Zstd-compressed raw file bytes,
+ *   <li>{@code blobs/<sha256-hex>.zst}: Zstd-compressed raw file bytes,
  *       deduplicated by content hash</li>
- *   <li>{@code files-index.json} — per-file history of {@code {ts, hash}}
- *       entries; the newest entry ≤ T selects the version for time travel</li>
+ *   <li>{@code files-index.json}: per-file history of {@code {ts, hash}}
+ *       entries; the newest entry <= T selects the version for time travel</li>
  * </ul>
  *
  * <p>Pruning drops history entries older than the cutoff and garbage-collects
@@ -122,7 +123,11 @@ public final class FileBlobStore {
 
         Path blob = blobsDir.resolve(hash + ".zst");
         if (!Files.exists(blob)) {
-            Files.write(blob, ZstdCodec.compress(content));
+            // Atomic write: a crash mid-write would otherwise leave a
+            // truncated blob whose name still matches its content hash, and
+            // the next backup would skip rewriting it, permanent, silent
+            // corruption of that file's history.
+            ZvcrFiles.atomicWrite(blob, ZstdCodec.compress(content));
         }
 
         List<Entry> history = index.files.computeIfAbsent(relativePath, k -> new ArrayList<>());
@@ -139,7 +144,7 @@ public final class FileBlobStore {
     }
 
     /**
-     * Restores every tracked file as of {@code timestamp} (newest entry ≤ T)
+     * Restores every tracked file as of {@code timestamp} (newest entry <= T)
      * into {@code targetDir}, preserving the world-relative paths.
      *
      * @return number of files restored
@@ -187,6 +192,10 @@ public final class FileBlobStore {
      * newest entry per file), then garbage-collects blobs referenced by no
      * remaining history.
      *
+     * <p>The index is flushed before this method returns: the blobs on disk
+     * and the index that references them must stay consistent, and the
+     * deletion of the blobs already happened here.
+     *
      * @return number of history entries removed
      */
     public int prune(long cutoff) throws IOException {
@@ -216,6 +225,9 @@ public final class FileBlobStore {
                 }
             }
         }
+        // The index now describes a smaller history; persist it before
+        // returning, or it would keep referencing the blobs just deleted.
+        flush();
         return removed;
     }
 
@@ -231,7 +243,7 @@ public final class FileBlobStore {
 
     /**
      * Distinct backup timestamps recorded across all tracked-file histories.
-     * A backup run that changed no tracked file is absent — but then it also
+     * A backup run that changed no tracked file is absent, but then it also
      * stored no new state, so there is nothing to restore for it.
      */
     public Set<Long> timestamps() {

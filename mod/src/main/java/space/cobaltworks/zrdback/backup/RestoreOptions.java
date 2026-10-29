@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -29,9 +29,9 @@ import space.cobaltworks.zvcr.region.Dimension;
  * What a restore should produce.
  *
  * <p>A full restore reproduces the world as it was: chunks, tile entities and
- * the auxiliary files (level.dat, player data, …). Partial restores exist for
- * the common recovery cases — a single dimension, or just the player data of
- * one player — where the goal is to extract something from the backup rather
+ * the auxiliary files (level.dat, player data, ...). Partial restores exist for
+ * the common recovery cases. a single dimension, or just the player data of
+ * one player. where the goal is to extract something from the backup rather
  * than to rebuild a bootable world.
  */
 public record RestoreOptions(Set<Dimension> dimensions, boolean chunks, boolean files,
@@ -47,7 +47,7 @@ public record RestoreOptions(Set<Dimension> dimensions, boolean chunks, boolean 
         return new RestoreOptions(dimensions, true, false, null);
     }
 
-    /** Only the auxiliary files (level.dat, player data, …). */
+    /** Only the auxiliary files (level.dat, player data, ...). */
     public static RestoreOptions filesOnly() {
         return new RestoreOptions(Set.of(), false, true, null);
     }

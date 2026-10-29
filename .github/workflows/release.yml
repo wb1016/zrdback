@@ -1,0 +1,52 @@
+name: release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '25'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+
+      - name: Build
+        run: ./gradlew build --console=plain
+
+      - name: Tag must match the build version
+        run: |
+          version="$(sed -n 's/^mod_version[[:space:]]*=[[:space:]]*//p' gradle.properties | tail -1)"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "error: tag '$GITHUB_REF_NAME' does not match mod_version '$version'" >&2
+            exit 1
+          fi
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "ZRDBack ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            mod/build/libs/zrdback-*.jar \
+            cli/build/libs/zrdback-cli-*-cli.jar

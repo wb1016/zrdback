@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -89,7 +89,7 @@ class StoreVerifierTest {
         store.storeContent(tmp, "level.dat", new byte[] {1, 2, 3}, 1000);
         store.flush();
 
-        // Remove the blob but keep the index — a broken store. The blob is
+        // Remove the blob but keep the index, a broken store. The blob is
         // named after the content hash, so find it rather than guessing.
         Path blob;
         try (var blobs = Files.list(tmp.resolve(StoreLayout.BLOBS_DIRECTORY))) {
@@ -117,6 +117,29 @@ class StoreVerifierTest {
         assertFalse(report.ok());
         assertTrue(report.problems().stream().anyMatch(p -> p.message().contains("orphan blob")),
                 () -> "expected an orphan blob problem: " + report.problems());
+    }
+
+    @Test
+    void flagsACorruptBlob(@TempDir Path tmp) throws Exception {
+        FileBlobStore store = FileBlobStore.open(tmp);
+        store.storeContent(tmp, "level.dat", new byte[] {1, 2, 3}, 1000);
+        store.flush();
+
+        // A truncated blob still has the right file name (the name is the
+        // hash of the uncompressed content), so only decompressing it
+        // reveals the corruption.
+        Path blob;
+        try (var blobs = Files.list(tmp.resolve(StoreLayout.BLOBS_DIRECTORY))) {
+            blob = blobs.findFirst().orElseThrow();
+        }
+        byte[] bytes = Files.readAllBytes(blob);
+        Files.write(blob, java.util.Arrays.copyOf(bytes, bytes.length / 2));
+
+        StoreVerifier.Report report = StoreVerifier.verify(tmp);
+        assertFalse(report.ok());
+        assertTrue(report.problems().stream().anyMatch(p -> p.message().contains("unreadable")
+                        || p.message().contains("corrupt blob")),
+                () -> "expected a corrupt blob problem: " + report.problems());
     }
 
     @Test

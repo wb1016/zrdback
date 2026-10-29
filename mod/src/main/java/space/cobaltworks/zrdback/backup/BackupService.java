@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -72,10 +72,10 @@ import space.cobaltworks.zrdback.BackupConfig;
  * backup first asks vanilla to flush its unsaved state (chunks, level.dat,
  * player data) so the snapshot is current, not the last autosave.
  *
- * <p>Flow per region file: header-only scan (8 KiB) → change gate
- * ({@code offset != 0 && headerTimestamp > chain-head timestamp}) → read only
- * the changed chunks via vanilla {@code RegionFile} → semantic diff against
- * the existing ZVCR chain head → insert. Unchanged chunks cost an in-memory
+ * <p>Flow per region file: header-only scan (8 KiB) -> change gate
+ * ({@code offset != 0 && headerTimestamp > chain-head timestamp}) -> read only
+ * the changed chunks via vanilla {@code RegionFile} -> semantic diff against
+ * the existing ZVCR chain head -> insert. Unchanged chunks cost an in-memory
  * timestamp compare.
  */
 public final class BackupService {
@@ -133,7 +133,7 @@ public final class BackupService {
 
     /**
      * Restores the world as of {@code timestamp} into
-     * {@code <output>/restore/<timestamp>/} — never into the live world save.
+     * {@code <output>/restore/<timestamp>/}. never into the live world save.
      */
     public WorldRestorer.Result restore(long timestamp) throws IOException {
         return new WorldRestorer(config, server).restore(timestamp);
@@ -147,9 +147,9 @@ public final class BackupService {
     }
 
     /**
-     * Aggregate statistics over all backup files — chain lengths, palette
+     * Aggregate statistics over all backup files. chain lengths, palette
      * dedup effectiveness, blob store size. Used to tune the checkpoint
-     * interval (HANDOFF §11.2).
+     * interval.
      */
     public Stats stats() throws IOException {
         int files = 0;
@@ -250,7 +250,7 @@ public final class BackupService {
      * <p>Chunks are compared through their stored chains: a chunk counts as
      * changed when its reconstructed state differs between the two timestamps.
      * The comparison is per chunk and per section, so it is exact but costs
-     * one reconstruction per chunk — fine for an operator-initiated command,
+     * one reconstruction per chunk. fine for an operator-initiated command,
      * too slow for a periodic job.
      *
      * @param older the earlier timestamp
@@ -473,7 +473,7 @@ public final class BackupService {
      * Every distinct restore-point timestamp in the store: chain-entry,
      * segment-state and tile-entity-delta timestamps from all {@code .zvcr3d}
      * files, plus blob-store history timestamps. A run that changed nothing
-     * leaves no timestamp anywhere — and nothing to restore — so it is
+     * leaves no timestamp anywhere, and nothing to restore. so it is
      * correctly absent. Region files are independent, so they are harvested in
      * parallel on the worker pool (same memory profile as {@link #prune}).
      */
@@ -587,7 +587,7 @@ public final class BackupService {
     /**
      * Drops the cached registry snapshot.
      *
-     * <p>The biome registry is dynamic — a datapack reload can shift its IDs —
+     * <p>The biome registry is dynamic, a datapack reload can shift its IDs.
      * so the snapshot is taken per backup run rather than per server lifetime.
      */
     private synchronized void resetRegistrySnapshot() {
@@ -599,7 +599,7 @@ public final class BackupService {
      * registry.
      *
      * <p>A file written under a different registry needs its IDs translated
-     * by name — otherwise the restore would place the <em>wrong blocks</em>
+     * by name. otherwise the restore would place the <em>wrong blocks</em>
      * while still looking valid. When the file's epoch cannot be determined
      * the identity remapper is used (the file was written by this mod before
      * the epoch was tracked, so it matches the live registry).
@@ -619,12 +619,12 @@ public final class BackupService {
             stored = RegistryManifest.read(config.outputDirectory(), fingerprint);
         } catch (IOException e) {
             throw new IOException("no registry manifest for epoch " + fingerprint
-                    + " — " + backupPath.getFileName() + " was written under a different Minecraft "
+                    + "; " + backupPath.getFileName() + " was written under a different Minecraft "
                     + "or mod version and cannot be extended without corrupting its history", e);
         }
         RegistryRemapper remapper = RegistryRemapper.from(stored, live);
         if (!remapper.isIdentity()) {
-            LOGGER.info("region file {} was written under a different registry — "
+            LOGGER.info("region file {} was written under a different registry; "
                     + "its block IDs will be translated to the current one", backupPath.getFileName());
         }
         return remapper;
@@ -697,7 +697,7 @@ public final class BackupService {
             if (!config.includesDimension(mapping.dimension().directoryName)) {
                 continue;
             }
-            // 26.x layout: world/dimensions/<ns>/<path>/region — resolved via the
+            // 26.x layout: world/dimensions/<ns>/<path>/region: resolved via the
             // vanilla API rather than hardcoded directory names.
             Path regionDir = net.minecraft.world.level.dimension.DimensionType
                     .getStorageFolder(mapping.levelKey(), worldRoot).resolve("region");
@@ -718,7 +718,7 @@ public final class BackupService {
 
         // Region files are independent (own .mca, own .zvcr3d): scan, chunk
         // inflate, extraction, packing, serialization and fsync all parallelize.
-        // Regions that kept changing while being read (world being modified —
+        // Regions that kept changing while being read (world being modified,
         // e.g. mass chunk generation) are re-submitted in later waves: the
         // write storm is transient, so a later pass reads them consistently.
         long changed = 0;
@@ -775,7 +775,7 @@ public final class BackupService {
      * Awaits one region's backup, isolating its failure.
      *
      * <p>Regions are independent, so one corrupt or unreadable region file must
-     * not abort the whole backup — the other regions' data is already written
+     * not abort the whole backup. the other regions' data is already written
      * and would be lost if the run aborted. A failed region is reported and
      * the backup continues.
      */
@@ -799,20 +799,20 @@ public final class BackupService {
     /**
      * Asks vanilla to flush its unsaved state (chunks, level.dat, player data)
      * before the backup reads the world from disk. Without this the backup
-     * captures the last autosave — player inventory, position and recent edits
+     * captures the last autosave. player inventory, position and recent edits
      * live only in memory until vanilla's pause/autosave/exit save, so a
      * restore could roll them back arbitrarily far.
      *
      * <p>The save must run on the server thread; this hops there and waits
      * (bounded, so a stopping server can't hang the backup thread). The mod
-     * itself still never writes to the world folder — vanilla does.
+     * itself still never writes to the world folder, vanilla does.
      */
     private void flushWorldSave() throws IOException {
         if (server.isSameThread()) {
             // Already on the server thread (the shutdown backup runs from the
             // SERVER_STOPPING event, which fires on it). Hopping through
             // server.execute() would queue the save and wait for a thread that
-            // is blocked right here — save inline instead.
+            // is blocked right here, save inline instead.
             try {
                 server.saveEverything(true, true, false);
             } catch (RuntimeException e) {
@@ -925,16 +925,16 @@ public final class BackupService {
                 Thread.sleep(50L * (attempt + 1));
             }
         } catch (NoSuchFileException e) {
-            // file vanished mid-walk — skip
+            // file vanished mid-walk, skip
             return null;
         } catch (IOException e) {
-            LOGGER.warn("could not read {} stably: {} — skipped", file, e.toString());
+            LOGGER.warn("could not read {} stably: {}, skipped", file, e.toString());
             return null;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return null;
         }
-        LOGGER.warn("{} kept changing while being read — skipped this backup round", file);
+        LOGGER.warn("{} kept changing while being read, skipped this backup round", file);
         return null;
     }
 
@@ -1042,7 +1042,7 @@ public final class BackupService {
     /**
      * Backs up one region file. The server writes region files concurrently
      * with this scan, and a rewrite moves the chunk to new sectors while the
-     * freed sectors get recycled by other chunks — reading through a header
+     * freed sectors get recycled by other chunks. reading through a header
      * cached before such a rewrite yields ANOTHER chunk's payload (valid NBT,
      * wrong position), which would corrupt the store with swapped chunks.
      *
@@ -1096,7 +1096,7 @@ public final class BackupService {
                 return RegionOutcome.ok(0, 0);
             }
 
-            // Read phase — results are buffered; nothing reaches the store
+            // Read phase: results are buffered; nothing reaches the store
             // until the region proves stable below.
             record PendingChunk(int localX, int localZ, ChunkExtractor.ExtractedChunk extracted) {}
             List<PendingChunk> pending = new ArrayList<>();
@@ -1104,7 +1104,7 @@ public final class BackupService {
                 for (RegionScanner.ScannedChunk chunk : changedChunks) {
                     CompoundTag chunkNbt = reader.readChunk(chunk.localX(), chunk.localZ());
                     if (chunkNbt == null) {
-                        continue; // read anomaly (mid-write) — vanilla logged it
+                        continue; // read anomaly (mid-write); vanilla logged it
                     }
                     // Recycled-sector guard: the payload must belong to the
                     // position it was read from.
@@ -1113,7 +1113,7 @@ public final class BackupService {
                     if (chunkNbt.getIntOr("xPos", expectedX) != expectedX
                             || chunkNbt.getIntOr("zPos", expectedZ) != expectedZ) {
                         LOGGER.warn("r.{}:{} chunk [{},{}] read while the server was rewriting it "
-                                + "(xPos/zPos mismatch) — skipped", rx, rz, chunk.localX(), chunk.localZ());
+                                + "(xPos/zPos mismatch); skipped", rx, rz, chunk.localX(), chunk.localZ());
                         continue;
                     }
                     String status = chunkNbt.contains("Status")
@@ -1137,7 +1137,7 @@ public final class BackupService {
             // nor mtime moved; only when the stat changed is the full header
             // compare (the authoritative check) performed. On filesystems with
             // pathologically coarse mtime granularity a same-tick write could
-            // slip through — bounded impact: the payloads read are still
+            // slip through. bounded impact: the payloads read are still
             // position-guarded (xPos/zPos) and the next backup re-inserts the
             // newer state (header timestamp > chain head).
             long lengthAfter = Files.size(mca);
@@ -1163,7 +1163,7 @@ public final class BackupService {
                 return RegionOutcome.ok(changedChunks.size(), inserted);
             }
             if (attempt < MAX_REGION_READ_ATTEMPTS) {
-                LOGGER.warn("r.{}:{} changed while being read (attempt {}/{}) — retrying",
+                LOGGER.warn("r.{}:{} changed while being read (attempt {}/{}); retrying",
                         rx, rz, attempt, MAX_REGION_READ_ATTEMPTS);
                 // Wait for the file to go quiet instead of a blind sleep: a
                 // region still under an active write storm would only burn
@@ -1171,7 +1171,7 @@ public final class BackupService {
                 waitForQuiescence(mca, 1000L);
             }
         }
-        LOGGER.warn("r.{}:{} kept changing while being read — skipped this backup round; "
+        LOGGER.warn("r.{}:{} kept changing while being read; skipped this backup round; "
                 + "the next backup will pick it up", rx, rz);
         return RegionOutcome.unstable();
     }
@@ -1196,7 +1196,7 @@ public final class BackupService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (IOException e) {
-            // file vanished or is not statable — let the scan handle it
+            // file vanished or is not statable, let the scan handle it
         }
     }
 
@@ -1251,7 +1251,7 @@ public final class BackupService {
      * {@link PackedDeltaData#deltasSinceFull}), so this is O(1) per insert
      * instead of re-deriving it by unpacking up to a full checkpoint gap of
      * deltas. "Full" detection ({@link PackedDeltaData#isFull}) unpacks
-     * entries and checks for {@code 0xFFFF} atoms — sound in practice
+     * entries and checks for {@code 0xFFFF} atoms. sound in practice
      * (0xFFFF is not a valid blockstate/biome ID), self-healing, and needs no
      * sidecar state.
      */

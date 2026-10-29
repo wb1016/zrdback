@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,7 +28,7 @@ public final class StoreFormat {
      *
      * <p>Matches the MC 26.3 protocol version, the same value the C++
      * reference implementation writes. It identifies the <em>format</em>, not
-     * the registry ID space — see {@link RegistryManifest} for that.
+     * the registry ID space. see {@link RegistryManifest} for that.
      */
     public static final int PROTOCOL_VERSION = 777;
 

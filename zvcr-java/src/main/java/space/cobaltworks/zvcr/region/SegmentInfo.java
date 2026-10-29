@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -66,7 +66,7 @@ public final class SegmentInfo {
 
     /**
      * State at (or before) {@code timestamp}: walk from the newest entry,
-     * adopting each entry's type until the entry's timestamp ≤ query.
+     * adopting each entry's type until the entry's timestamp <= query.
      */
     public Optional<SegmentState> snapshotBefore(long timestamp) {
         Optional<SegmentState> latestOpt = latestSnapshot();

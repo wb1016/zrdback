@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,13 +35,13 @@ import space.cobaltworks.zvcr.region.Segment;
 /**
  * The registry remapper: a chain's atoms are registry IDs, so translating a
  * backup from one registry epoch to another must move <em>every</em> entry of
- * the chain — the head snapshot and the deltas below it.
+ * the chain, the head snapshot and the deltas below it.
  */
 class ChainRemapperTest {
 
     /**
      * A two-entry chain: the head holds the newer state {@code {1,2,9}}, the
-     * delta below it holds the older state {@code {1,2,3}} — stored as
+     * delta below it holds the older state {@code {1,2,3}}, stored as
      * {@code {UNCHANGED, UNCHANGED, 3}} because only the last position
      * differs.
      */

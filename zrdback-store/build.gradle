@@ -14,7 +14,7 @@ repositories {
 dependencies {
     // Pure-Java store layer: the ZVCR-3D format library plus the backup store
     // bookkeeping (blob store, timestamp/epoch sidecars, inspection, pruning).
-    // No Minecraft classes — usable from the CLI without a game install.
+    // No Minecraft classes usable from the CLI without a game install.
     api project(':zvcr-java')
 
     // Gson is provided by Minecraft at runtime and by the CLI at runtime;

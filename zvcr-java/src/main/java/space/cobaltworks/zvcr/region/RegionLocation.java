@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -34,7 +34,7 @@ public record RegionLocation(int rx, int rz, Dimension dimension) {
     public static final String EXTENSION = "zvcr3d";
     public static final String PREFIX = "r.";
 
-    /** {@code floor(region / 32)} — plain {@code /} truncates toward zero for negatives. */
+    /** {@code floor(region / 32)}, plain {@code /} truncates toward zero for negatives. */
     public static int floorDiv32(int regionCoordinate) {
         if (regionCoordinate >= 0) {
             return regionCoordinate / 32;

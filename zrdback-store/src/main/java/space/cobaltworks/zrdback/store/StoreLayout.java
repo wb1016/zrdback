@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -40,7 +40,7 @@ import space.cobaltworks.zvcr.region.RegionLocation;
  *   end/...
  *   blobs/&lt;sha256&gt;.zst        content-addressed auxiliary files
  *   files-index.json             per-file {timestamp, hash} history
- *   registry/&lt;fingerprint&gt;.manifest  registry ID → name tables
+ *   registry/&lt;fingerprint&gt;.manifest  registry ID -> name tables
  * </pre>
  */
 public final class StoreLayout {

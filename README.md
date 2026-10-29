@@ -18,46 +18,48 @@ Lastly, the mod de-compresses the region files to make reverse-delta calculation
 
 ```
 zrdback
-├── zvcr-java            pure-Java ZVCR-3D format library (byte-compatible)
-│   ├── paletted pack/unpack (4/8/16-bit, uint64 cells, LSB-first)
-│   ├── reverse delta chains + mid-chain checkpoints
-│   ├── block/biome palette tables (canonical ordering, dedup)
-│   ├── tile entity history (put/erase, canonical NBT)
-│   ├── region container serialization + Zstd level 8 (frame checksum)
-│   ├── registry remapping (translate a chain between registry epochs)
-│   └── directory layout + floorDiv32 sector math
-├── zrdback-store         pure-Java store layer (no Minecraft classes)
-│   ├── FileBlobStore    content-addressed blobs for non-chunk files
-│   ├── RegistryManifest registry epoch tables (ID -> namespaced name)
-│   ├── EpochSidecar     which registry epoch a backup file was written under
-│   ├── StoreVerifier    integrity check over a whole store
-│   └── StorePruner      retention pruning
-├── cli                  standalone tool for the store (list/verify/stats/prune)
-├── BackupService        header scan -> change gate -> extract -> insert -> atomic write
-│                         (region files processed in parallel by nice-19 workers)
-├── WorldRestorer        reconstructs a bootable world from any timestamp
-└── /zrdback              now | prune | restore | list | diff | verify | stats | status
+-   zvcr-java            pure-Java ZVCR-3D format library (byte-compatible)
+-   -   paletted pack/unpack (4/8/16-bit, uint64 cells, LSB-first)
+-   -   reverse delta chains + mid-chain checkpoints
+-   -   block/biome palette tables (canonical ordering, dedup)
+-   -   tile entity history (put/erase, canonical NBT)
+-   -   region container serialization + Zstd level 8 (frame checksum)
+-   -   registry remapping (translate a chain between registry epochs)
+-   -   directory layout + floorDiv32 sector math
+-   zrdback-store        pure-Java store layer (no Minecraft classes)
+-   -   FileBlobStore    content-addressed blobs for non-chunk files
+-   -   RegistryManifest registry epoch tables (ID -> namespaced name)
+-   -   EpochSidecar     which registry epoch a backup file was written under
+-   -   StoreVerifier    integrity check over a whole store
+-   -   StorePruner      retention pruning
+-   cli                  standalone tool for the store (list/verify/stats/prune)
+-   golden-tool          cross-validation harness against the C++ reference
+-   bench                ZRDBack-vs-FastBack benchmark (local-only)
+-   BackupService        header scan -> change gate -> extract -> insert -> atomic write
+-   WorldRestorer        reconstructs a bootable world from any timestamp
+-   /zrdback              now | prune | restore | list | diff | verify | stats | status
 ```
 
 # Performance
 
-Benchmarked against FastBack 0.35.0 (native git + git-lfs) on a dedicated Fabric 26.3 server,
-Java 25, 20 rounds of +10k pregenerated chunks (10.2k -> 200k chunks, world 2.1 GB).
+Benchmarked against FastBack 0.35.0 (native git + git-lfs) on a dedicated Fabric 26.3 server
+(loader 0.20.1, Java 26), 20 rounds of +10k pregenerated chunks (10.2k -> 200k chunks,
+world 2.0 GB). Reproduce with `bench/bench.sh`; raw results in `bench/out/results.csv`.
 ```mermaid
 xychart-beta
     title "Backup store size (MB) over 20 rounds"
     x-axis [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20]
     y-axis "MB" 0 --> 7000
-    line [43, 84, 128, 175, 216, 260, 303, 345, 390, 435, 476, 526, 571, 618, 660, 710, 754, 800, 838, 884]
-    line [119, 301, 471, 754, 928, 1206, 1584, 1777, 2073, 2476, 2972, 3223, 3574, 4036, 4597, 4816, 5130, 5541, 6041, 6652]
+    line [47, 90, 136, 183, 224, 269, 313, 354, 397, 438, 475, 520, 561, 603, 641, 685, 725, 765, 801, 844]
+    line [131, 325, 497, 782, 953, 1229, 1609, 1802, 2090, 2476, 2943, 3173, 3493, 3912, 4420, 4618, 4900, 5271, 5724, 6281]
 ```
 
 | | ZRDBack | FastBack |
 |---|---|---|
-| incremental backup time | 6.1-9.9 s, flat in world size | 5-6 s per round |
-| store size @ 10k chunks | 43.0 MB (2.8x smaller) | 119.3 MB  |
-| store size @ 200k chunks | 884 MB (7.5x smaller) | 6.65 GB  |
-| growth per ~10k-chunk backup | ~38-50 MB | ~170-610 MB |
+| incremental backup time | 6.8~10.3 s, flat in world size | 5-6 s per round |
+| store size @ 10k chunks | 47.0 MB (2.8x smaller) | 130.7 MB  |
+| store size @ 200k chunks | 844 MB (7.4x smaller) | 6.28 GB  |
+| growth per ~10k-chunk backup | ~35-47 MB | ~131-509 MB |
 
 The size gap widens as history accumulates: git re-blobs every modified region file whole
 (~1024 chunks worth per touched file), while ZRDBack stores per-chunk reverse deltas.
@@ -65,7 +67,7 @@ At 200k chunks, 20 restore points cost 0.43x the live world size with ZRDBack vs
 
 Backup work runs on a fixed worker pool (default half the cores) at
 minimum thread priority (nice 19 on Linux), so backups soak up idle CPU and server ticks are always served first;
-measured zero tick loss on a live server.
+measured zero tick loss on a live server (0 "can't keep up" warnings across all 20 rounds).
 
 # How it works
 
@@ -76,9 +78,8 @@ ZRDBack reads only that header (8 KiB per region file, no chunk data) and
 compares each chunk's timestamp against the newest timestamp
 stored in the backup for that chunk.
 
-```
-chunk changed  =>  offset != 0  &&  header timestamp > chain-head timestamp
-```
+chunk changed:  `offset != 0  &&  header timestamp > chain-head timestamp`
+
 
 Unchanged chunks cost an in-memory comparison. Only changed chunks are decompressed and parsed.
 
@@ -130,6 +131,10 @@ and the parent directory is fsynced. A crash mid-backup never corrupts the previ
 `/zrdback restore <timestamp|latest>` reconstructs a complete, bootable world into
 `<output>/restore/<timestamp>/`; never into the live world. Restoring the same
 timestamp again replaces the previous output.
+
+Verified end to end on a 200k-chunk world: the restored copy was compared
+chunk-by-chunk against the live world and was block-identical. 0 missing
+chunks, 0 content mismatches, 0 wrongly-placed chunks, 0 header errors.
 
 The timestamp must fall within the recorded history (oldest...newest backup
 state); older timestamps fail with the valid range instead of producing a
@@ -200,12 +205,12 @@ and recent edits are never lost to the autosave interval.
 
 ```
 zrdback-backups/
-├── overworld/<sectorX>/<sectorZ>/r.<regionX>.<regionZ>.zvcr3d
-├── nether/...  end/...
-├── blobs/<sha256>.zst          # deduplicated auxiliary files
-├── files-index.json            # per-file {timestamp, hash} history
-├── registry/<fingerprint>.manifest   # registry ID -> namespaced name tables
-└── restore/<timestamp>/        # output of a restore
+-   overworld/<sectorX>/<sectorZ>/r.<regionX>.<regionZ>.zvcr3d
+-   nether/...  end/...
+-   blobs/<sha256>.zst          # deduplicated auxiliary files
+-   files-index.json            # per-file {timestamp, hash} history
+-   registry/<fingerprint>.manifest   # registry ID -> namespaced name tables
+-   -   restore/<timestamp>/        # output of a restore
 ```
 
 Region coordinates use the standard Anvil mapping; sector directories are
@@ -213,21 +218,21 @@ Region coordinates use the standard Anvil mapping; sector directories are
 
 Each region file has two sidecars next to it:
 
-- `r.X.Z.zvcr3d.ts` — the file's sorted chain timestamps (advisory cache).
-- `r.X.Z.zvcr3d.ep` — the registry epoch the file's atoms were written under.
+- `r.X.Z.zvcr3d.ts` : the file's sorted chain timestamps (advisory cache).
+- `r.X.Z.zvcr3d.ep` : the registry epoch the file's atoms were written under.
 
 ## Registry epochs (cross-version restore)
 
 Chunks store blocks and biomes as numeric registry IDs. Those IDs only mean
 something for the exact registry that produced them: a Minecraft update, a mod
-added or removed, or a datapack change shifts the ID space — and a backup
-taken before the change would then restore the **wrong blocks** while still
+added or removed, or a datapack change shifts the ID space. and a backup
+taken before the change would then restore the wrong blocks while still
 looking perfectly valid.
 
-The mod therefore records the registry ID → namespaced name mapping of the
+The mod therefore records the registry ID -> namespaced name mapping of the
 registry it backed up against (`registry/<fingerprint>.manifest`) and tags
 every region file with the epoch it was written under. On restore, a file from
-a different epoch is translated *by name* into the current registry, so:
+a different epoch is translated by name into the current registry, so:
 
 - blocks that still exist are restored correctly, even across MC versions;
 - blocks that no longer exist become air (never a different block);
@@ -262,7 +267,7 @@ many chunks and auxiliary files changed between them.
 
 ## Command-line tool
 
-`zrdback-cli` operates on a store without running Minecraft — useful for
+`zrdback-cli` operates on a store without running Minecraft. useful for
 checking a backup on a machine that has no game installed, or for automating
 retention:
 
@@ -275,6 +280,26 @@ zrdback-cli prune   --store DIR --days N    # drop history older than N days
 
 `verify` parses every region file, checks the chain ordering, verifies the
 blob index against the blobs on disk, and reports protocol-version mismatches.
+
+The CLI is published as a self-contained executable jar. copy it to a backup
+machine with no Minecraft installation and no Java build tools:
+
+```
+java -jar zrdback-cli-<version>-cli.jar verify --store /path/to/store
+```
+
+# Benchmark
+
+`bench/` contains the ZRDBack-vs-FastBack benchmark that produces the numbers
+above. It is local-only (it needs ~10 GB of disk and a large heap), but the
+setup is scripted:
+
+```
+bench/setup/setup.sh      # server + pinned mods + the build under test
+bench/bench.sh            # 20 rounds
+```
+
+See `bench/README.md` for the details.
 
 # License and credits
 
@@ -292,3 +317,8 @@ The underlying ZVCR-3D format and the reference implementation (`zvcr`, `zvcr_ut
 crayne are licensed under the GNU Lesser General Public License v3.0. The Java format
 library in this repository is a port of concepts from that LGPL-licensed reference; it is
 redistributed as part of this GPL-licensed work in accordance with the LGPL.
+
+The reference implementation itself is vendored as a git submodule under
+`golden-tool/zvcr/` (pinned to a specific upstream commit) so the cross-validation
+harness builds the reference sources unmodified. It stays under its own LGPL-3.0
+license, with its copyright and attribution intact.

@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -36,7 +36,7 @@ import space.cobaltworks.zrdback.store.RegistryManifest;
 
 /**
  * The registry remapper translates a backup from the registry epoch it was
- * written under into the current one — the difference between restoring the
+ * written under into the current one, the difference between restoring the
  * right blocks and restoring plausible-looking wrong ones.
  */
 class RegistryRemapperTest {

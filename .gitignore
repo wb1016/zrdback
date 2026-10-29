@@ -15,3 +15,17 @@ logs/
 */*.iml
 */bin/
 */logs/
+
+# golden-tool: CMake build tree (the zvcr/ submodule is tracked)
+golden-tool/build/
+golden-tool/zvcr/build/
+
+# bench: generated server, world, results and Python environment
+bench/server/
+bench/out/
+bench/*.log
+bench/.venv/
+bench/__pycache__/
+bench/tools/__pycache__/
+*.pyc
+*.zip

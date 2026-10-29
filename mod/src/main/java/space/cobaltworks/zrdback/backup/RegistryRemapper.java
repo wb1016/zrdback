@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -31,7 +31,7 @@ import space.cobaltworks.zrdback.store.RegistryManifest;
  * before a Minecraft update or a mod change would otherwise restore the
  * <em>wrong blocks</em> while still looking perfectly valid.
  *
- * <p>The mod records the ID → name mapping of the registry it backed up
+ * <p>The mod records the ID -> name mapping of the registry it backed up
  * against ({@link RegistryManifest}) and translates the stored IDs through it
  * into the current registry. Blocks that no longer exist become air.
  */
@@ -80,7 +80,7 @@ public final class RegistryRemapper {
      * Builds a remapper from a stored manifest to the live registry.
      *
      * <p>When the two epochs have the same fingerprint, the mapping is the
-     * identity — no per-ID translation is needed and the name lookup is
+     * identity. no per-ID translation is needed and the name lookup is
      * skipped.
      *
      * @param stored the manifest of the epoch the backup was written under, or

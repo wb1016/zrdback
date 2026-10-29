@@ -14,6 +14,18 @@ repositories {
 dependencies {
     implementation project(':zrdback-store')
     implementation "com.google.code.gson:gson:${gson_version}"
+
+    testImplementation platform("org.junit:junit-bom:${junit_version}")
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
 }
 
 application {
@@ -25,4 +37,35 @@ tasks.withType(JavaCompile).configureEach {
     options.compilerArgs << "-Xlint:deprecation"
     options.encoding = 'UTF-8'
     options.release = Integer.parseInt(project.java_version)
+}
+
+// The plain `jar` task produces a library jar without a Main-Class and
+// without its dependencies, so `java -jar` cannot run it. Ship a
+// self-contained executable jar instead. the CLI is meant to be copied to
+// a backup machine that has no Gradle or Minecraft installation.
+tasks.register('cliJar', Jar) {
+    archiveClassifier = 'cli'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes(
+            'Main-Class': application.mainClass.get(),
+            'Implementation-Title': 'zrdback-cli',
+            'Implementation-Version': project.version
+        )
+    }
+
+    from sourceSets.main.output
+    from {
+        configurations.runtimeClasspath.findAll { it.name.endsWith('.jar') }.collect { zipTree(it) }
+    }
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/MANIFEST.MF'
+
+    // The runtime classpath contains the project jars; bundle their built
+    // outputs, so this task has to wait for them.
+    dependsOn configurations.runtimeClasspath
+}
+
+tasks.named('assemble') {
+    dependsOn 'cliJar'
 }

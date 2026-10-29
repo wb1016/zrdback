@@ -1,0 +1,25 @@
+# Pinned mod set for the ZRDBack benchmark.
+#
+# Format: name|project_id|version_id|filename|sha512
+#
+# Version IDs are immutable on Modrinth, so a pinned ID always resolves to
+# the same file. The sha512 is verified after download.
+#
+# Dependency notes (verified against each jar's fabric.mod.json):
+#   - fabric-api is the only external dependency. Chunky, FastBack and
+#     ZRDBack all require it.
+#   - c2me's `c2me-base` dependency ships *inside* the c2me jar as a nested
+#     jar (META-INF/jars/c2me-fabric-base-...-all.jar), as do its other
+#     libraries (caffeine, jctools, rxjava, mixinsquared).
+#   - lithium requires `mixinextras >= 0.5.5`, which fabric-loader ships
+#     itself (META-INF/jars/mixinextras-fabric-0.5.5.jar). It is not on
+#     Modrinth and must not be downloaded separately.
+#   - FastBack's `fabric-permissions-api-v0` is a nested jar inside the
+#     FastBack jar.
+#   - ZRDBack itself is built from this repository, not downloaded.
+
+fabric-api|P7dR8mSH|EQKgpeKu|fabric-api-0.165.0+26.3.jar|0a4b8a14e847b71567b557b43d906c2167fa263eeeef37454a821ba286996e3da1616dc2d9647736d28a250d5ecf400541cae808359b29a62324a8a6f2ad5e30
+lithium|gvQqBUqZ|fWv5bnZk|lithium-fabric-0.26.3+mc26.3.jar|2ca92fb530135d2baddf0ba4cc4f93976234876a38c4aa02b487b2552400f005afcfbeebf5373fb4396fe2020537a42d7597b8da5a52b904355ef51d5fef07ad
+c2me-fabric|VSNURh3q|gKKkuSYc|c2me-fabric-mc26.3-0.4.2-alpha.0.106.jar|047ed3fe3869d0185c6d1e94fd1e725b2ad40047e4929f22692090570af28d0075849cb65335b602658859c7d437cce51c94082c0c798617314764cfdc0a1d71
+chunky|fALzjamp|4Eotm6ov|Chunky-Fabric-1.5.3.jar|b83bfe7b218d0aa6232af977ae741dc1f82b10e50cd12bb759f65cf416b8b62beccb543e587ef0b9670abe03815660f8e091bc6823624d65cf07300571573516
+fastback|ZHKrK8Rp|RvW6Ltl7|fastback-fabric-0.35.0+26.3.0.jar|ffb1ce48d51afa755d4614b406603221ac04160dd6b9ab798e092fc7c80f9075b70dfcb23b004f9673e600a8e5178abe69b43fb7ad78cba46df2902b782f8064

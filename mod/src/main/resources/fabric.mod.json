@@ -10,7 +10,7 @@
   },
   "environment": "*",
   "authors": [
-    "CobaltDev"
+    "CobaltWorks"
   ],
   "contributors": [
     "crayne"
@@ -22,7 +22,7 @@
     ]
   },
   "depends": {
-    "fabricloader": ">=${fabric_loader_version}",
+    "fabricloader": ">=${loader_version}",
     "fabric-api": "*",
     "minecraft": ">=${minecraft_version}"
   }

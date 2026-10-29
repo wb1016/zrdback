@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,7 +28,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * Windowing behind {@code /zrdback list <min> <max> <skip> <keep>} —
+ * Windowing behind {@code /zrdback list <min> <max> <skip> <keep>}
  * pure logic, no store. Ages are exact to the second: a stamp exactly
  * {@code min} or {@code max} days old is inside the window (inclusive).
  */
@@ -44,11 +44,11 @@ class BackupListWindowTest {
     void dayWindowMatchesCommandLineExample() {
         // /zrdback list days 2 3 ... on Oct 06: backups between Oct 03 and Oct 04.
         List<Long> store = List.of(
-                ts("2026-10-06T08:00:00Z"), // 4h old — too young
-                ts("2026-10-04T12:00:00Z"), // exactly 2d — in
-                ts("2026-10-03T12:00:00Z"), // exactly 3d — in
-                ts("2026-10-02T12:00:00Z"), // 4d — too old
-                ts("2026-10-01T00:00:00Z")); // 5.5d — too old
+                ts("2026-10-06T08:00:00Z"), // 4h old, too young
+                ts("2026-10-04T12:00:00Z"), // exactly 2d, in
+                ts("2026-10-03T12:00:00Z"), // exactly 3d, in
+                ts("2026-10-02T12:00:00Z"), // 4d, too old
+                ts("2026-10-01T00:00:00Z")); // 5.5d, too old
         BackupService.BackupList result = BackupService.window(store, NOW, 2, 3, 0, 50);
         assertEquals(List.of(ts("2026-10-04T12:00:00Z"), ts("2026-10-03T12:00:00Z")),
                 result.timestamps());
@@ -104,9 +104,9 @@ class BackupListWindowTest {
     @Test
     void maxDaysZeroMeansUnbounded() {
         List<Long> store = List.of(
-                ts("2026-10-06T00:00:00Z"), // 12h — too young
-                ts("2026-10-04T00:00:00Z"), // 2.5d — in
-                ts("2025-10-06T00:00:00Z")); // a year — in
+                ts("2026-10-06T00:00:00Z"), // 12h,  too young
+                ts("2026-10-04T00:00:00Z"), // 2.5d,  in
+                ts("2025-10-06T00:00:00Z")); // a year,  in
         BackupService.BackupList result = BackupService.window(store, NOW, 2, 0, 0, 50);
         assertEquals(List.of(ts("2026-10-04T00:00:00Z"), ts("2025-10-06T00:00:00Z")),
                 result.timestamps());

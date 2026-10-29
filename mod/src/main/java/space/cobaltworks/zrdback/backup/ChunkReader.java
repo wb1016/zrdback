@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,7 +35,7 @@ import net.minecraft.world.level.chunk.storage.RegionStorageInfo;
 
 /**
  * Reads chunk NBT from live Anvil region files using the server's own
- * {@link RegionFile} class — full per-chunk codec dispatch (gzip/deflate/
+ * {@link RegionFile} class. full per-chunk codec dispatch (gzip/deflate/
  * none/lz4) and external {@code .mcc} oversized-chunk support for free.
  *
  * <p>The region file is opened without the DSYNC flag and never written to;

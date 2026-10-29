@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -32,15 +32,15 @@ import java.util.List;
 import space.cobaltworks.zvcr.io.ZstdCodec;
 
 /**
- * A snapshot of the numeric-ID → namespaced-name mapping a backup was written
- * against — the "registry epoch" of that backup.
+ * A snapshot of the numeric-ID -> namespaced-name mapping a backup was written
+ * against the "registry epoch" of that backup.
  *
  * <p>Chunks store block states and biomes as numeric registry IDs. Those IDs
  * are only meaningful for the exact registry that produced them: a Minecraft
  * update or a mod change shifts the ID space, so an old backup would otherwise
  * restore the <em>wrong blocks</em> while still looking valid.
  *
- * <p>A manifest records the ID → canonical name mapping of one epoch. To
+ * <p>A manifest records the ID -> canonical name mapping of one epoch. To
  * restore a file written in a different epoch, the stored IDs are translated
  * through the manifest into the current registry by name; blocks that no
  * longer exist fall back to air.
@@ -82,7 +82,7 @@ public final class RegistryManifest {
                 protocolVersion, blockNames, biomeNames);
     }
 
-    /** Fingerprint over the whole ID → name mapping. */
+    /** Fingerprint over the whole ID -> name mapping. */
     public static String fingerprintOf(int protocolVersion, List<String> blockNames,
                                        List<String> biomeNames) {
         MessageDigest digest = sha256();

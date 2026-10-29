@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,8 +42,7 @@ import space.cobaltworks.zrdback.backup.WorldRestorer;
 import space.cobaltworks.zrdback.store.StoreVerifier;
 
 /**
- * {@code /zrdback now | prune | restore | list | diff | verify | status} —
- * moderator level required.
+ * {@code /zrdback now | prune | restore | list | diff | verify | status}, moderator level required.
  *
  * <p>Backup runs execute on the caller's executor (async); commands only
  * enqueue.
@@ -83,11 +82,11 @@ public final class BackupCommands {
                             }
                             if (result.regionsSkipped() > 0) {
                                 message += "; " + result.regionsSkipped()
-                                        + " region(s) skipped (world was being modified) — run again once chunk generation settles";
+                                        + " region(s) skipped (world was being modified); run again once chunk generation settles";
                             }
                             if (result.regionsFailed() > 0) {
                                 message += "; " + result.regionsFailed()
-                                        + " region(s) FAILED (corrupt or unreadable) — check the log";
+                                        + " region(s) FAILED (corrupt or unreadable); check the log";
                             }
                             return message;
                         })))
@@ -291,7 +290,7 @@ public final class BackupCommands {
 
     /**
      * {@code /zrdback list [min-days] [max-days] [skip-nums] [keep-nums]}
-     * — lists restore-point timestamps. Omitted args: min 0, max unbounded
+     * lists restore-point timestamps. Omitted args: min 0, max unbounded
      * (also when given as 0), skip 0, keep {@value #LIST_DEFAULT_KEEP}.
      */
     private static int executeList(CommandSourceStack source,
@@ -393,7 +392,7 @@ public final class BackupCommands {
                 source.sendSystemMessage(Component.literal("ZVCR Backup failed: "
                         + (cause.getMessage() != null ? cause.getMessage() : cause)));
                 if (cause instanceof BackupService.StoreBusyException) {
-                    // Expected condition (concurrent manual command) — not an error.
+                    // Expected condition (concurrent manual command),  not an error.
                     space.cobaltworks.zrdback.ZrdBack.LOGGER.info("backup task skipped: {}",
                             cause.getMessage());
                 } else {

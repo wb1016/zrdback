@@ -1,6 +1,6 @@
 /*
- * ZRDBack — Zstd Reverse Delta Backup
- * Copyright (C) 2026 CobaltDev
+ * ZRDBack: Zstd Reverse Delta Backup
+ * Copyright (C) 2026 CobaltWorks
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ import space.cobaltworks.zvcr.Zvcr;
  * translation table.
  *
  * <p>Chains store <em>global</em> registry IDs (block states, biomes). Those
- * IDs are only meaningful for the registry that produced them — a Minecraft
+ * IDs are only meaningful for the registry that produced them. a Minecraft
  * update or a mod change shifts the ID space. Remapping translates a chain
  * written against an older registry into the current one so a restore places
  * the right blocks instead of the right <em>IDs</em>.
@@ -53,7 +53,7 @@ public final class AtomRemapper {
      * <p>Palette order is preserved (the canonical ascending order is a
      * property of the <em>values</em>, and the mapping is a function of the
      * value, so a translated palette stays sorted iff the original was). The
-     * packed indices are untouched — they index the palette, not the atoms.
+     * packed indices are untouched, they index the palette, not the atoms.
      */
     public static PackedData remap(PackedData data, IntUnaryOperator op) {
         if (data instanceof PackedData.SingleValue single) {
