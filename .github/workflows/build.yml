@@ -60,10 +60,26 @@ jobs:
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v2
 
-      - name: Build the reference tool
+      - name: Check the reference checkout and toolchain
         run: |
-          cmake -B golden-tool/build -S golden-tool
-          cmake --build golden-tool/build -j
+          set -euo pipefail
+          if [ ! -f golden-tool/zvcr/zvcr_lib/CMakeLists.txt ]; then
+            echo "::error::zvcr submodule is missing (golden-tool/zvcr/zvcr_lib/CMakeLists.txt not found)"
+            git submodule status || true
+            exit 1
+          fi
+          git submodule status
+          cmake --version
+          "${CXX:-g++}" --version
+
+      - name: Configure the reference tool
+        run: cmake -B golden-tool/build -S golden-tool
+
+      - name: Build the reference tool
+        # Bounded on purpose: `cmake --build ... -j` with no job count hands
+        # make an unlimited `-j`, which can start hundreds of compilers at
+        # once and OOM the runner.
+        run: cmake --build golden-tool/build --parallel 4
 
       - name: Generate the reference container
         run: |

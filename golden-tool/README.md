@@ -17,7 +17,7 @@ Requires CMake >= 3.25 and a C++23 compiler.
 ```sh
 cd golden-tool
 cmake -B build -S .
-cmake --build build -j
+cmake --build build --parallel 4
 ```
 
 Dependencies (`abseil`, `zstd`, `fmt`, `result-cpp`) are fetched by CMake.
