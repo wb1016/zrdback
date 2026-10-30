@@ -39,12 +39,13 @@ tasks.withType(JavaCompile).configureEach {
     options.release = Integer.parseInt(project.java_version)
 }
 
-// The plain `jar` task produces a library jar without a Main-Class and
-// without its dependencies, so `java -jar` cannot run it. Ship a
-// self-contained executable jar instead. the CLI is meant to be copied to
-// a backup machine that has no Gradle or Minecraft installation.
-tasks.register('cliJar', Jar) {
-    archiveClassifier = 'cli'
+// The default `jar` task produces a library jar without a Main-Class and
+// without its dependencies, so `java -jar` cannot run it, and nothing in
+// this repository consumes `:cli` as a library. Make the main jar the
+// self-contained executable one instead, so the artifact is simply
+// `zrdback-cli-<version>.jar`. The CLI is meant to be copied to a backup
+// machine that has no Gradle or Minecraft installation.
+jar {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 
     manifest {
@@ -55,7 +56,6 @@ tasks.register('cliJar', Jar) {
         )
     }
 
-    from sourceSets.main.output
     from {
         configurations.runtimeClasspath.findAll { it.name.endsWith('.jar') }.collect { zipTree(it) }
     }
@@ -64,8 +64,4 @@ tasks.register('cliJar', Jar) {
     // The runtime classpath contains the project jars; bundle their built
     // outputs, so this task has to wait for them.
     dependsOn configurations.runtimeClasspath
-}
-
-tasks.named('assemble') {
-    dependsOn 'cliJar'
 }

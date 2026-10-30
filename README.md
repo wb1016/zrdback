@@ -285,7 +285,7 @@ The CLI is published as a self-contained executable jar. copy it to a backup
 machine with no Minecraft installation and no Java build tools:
 
 ```
-java -jar zrdback-cli-<version>-cli.jar verify --store /path/to/store
+java -jar zrdback-cli-<version>.jar verify --store /path/to/store
 ```
 
 # Benchmark

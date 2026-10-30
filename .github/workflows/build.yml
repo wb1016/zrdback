@@ -39,7 +39,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zrdback-cli
-          path: cli/build/libs/*-cli.jar
+          path: cli/build/libs/*.jar
 
   # Cross-validate the Java ZVCR-3D port against the C++ reference
   # implementation (the `zvcr` submodule). The Java writer's uncompressed
