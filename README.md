@@ -31,13 +31,14 @@ zrdback
 -   -   RegistryManifest registry epoch tables (ID -> namespaced name)
 -   -   EpochSidecar     which registry epoch a backup file was written under
 -   -   StoreVerifier    integrity check over a whole store
--   -   StorePruner      retention pruning
+-   -   StoreInspector   store statistics and restore-point diffs
+-   -   StorePruner      retention pruning (age limit and/or snapshot count)
+-   -   RetentionPolicy  the two prune limits and how they combine
 -   cli                  standalone tool for the store (list/verify/stats/prune)
 -   golden-tool          cross-validation harness against the C++ reference
 -   bench                ZRDBack-vs-FastBack benchmark (local-only)
 -   BackupService        header scan -> change gate -> extract -> insert -> atomic write
 -   WorldRestorer        reconstructs a bootable world from any timestamp
--   /zrdback              now | prune | restore | list | diff | verify | stats | status
 ```
 
 # Performance
@@ -170,6 +171,7 @@ Configuration lives under `config/zrdback.properties`
 | `interval-minutes` | `60` | Minutes between automatic backups. |
 | `checkpoint-interval` | `32` | Full snapshot every N deltas per chain (bounds reconstruction cost). |
 | `retention-days` | `0` | Auto-prune entries older than N days after each backup. `0` = keep forever. |
+| `retention-snapshots` | `0` | Keep at least N restore points after each backup, no matter how old they are. `0` = the count does not constrain retention. |
 | `threads` | `0` | Worker threads for backup/prune. `0` = auto (half the cores, min 1). Workers run at minimum priority so ticks are served first. |
 | `backup-on-stop` | `true` | Run a final backup while the server shuts down, so the shutdown state (players, last edits) is captured instead of waiting for the next scheduled pass. |
 | `compression-level` | `4` | Zstd level for incremental backups (1..19). Prune rewrites always use level 8. |
@@ -183,10 +185,6 @@ process and keep the flat layout.
 
 ## Commands
 
-Every backup first asks vanilla to save (`saveEverything`): chunks, `level.dat`
-and player data are flushed to disk before the snapshot, so inventory, position
-and recent edits are never lost to the autosave interval.
-
 | Command | Effect |
 |---|---|
 | `/zrdback now` | Run an incremental backup immediately. |
@@ -197,9 +195,20 @@ and recent edits are never lost to the autosave interval.
 | `/zrdback list [min-days] [max-days] [skip-nums] [keep-nums]` | List restore-point timestamps, newest first, whose age is between `min-days` and `max-days` (inclusive; `max-days` 0 = unbounded), after skipping the `skip-nums` newest; shows at most `keep-nums` (default 50). Omitted: min 0, max unbounded, skip 0. |
 | `/zrdback diff <older> <newer>` | Compare two restore points: how many chunks and auxiliary files changed between them. |
 | `/zrdback verify` | Check the store for corruption: every region file parses, chains are ordered, the blob index matches the blobs on disk, protocol versions agree. |
-| `/zrdback prune <days>` | Drop chain/blob history older than N days (newest state is always kept), GC unreferenced blobs. |
+| `/zrdback prune <days> [nums]` | Drop history older than N days, keeping the history of the last `nums` restore points. A value below 1 disables that limit, so `prune 0 5` keeps the history of the last five backups regardless of their age. With both limits disabled nothing is pruned. |
 | `/zrdback stats` | Chain lengths, palette dedup ratio, blob store size for tuning `checkpoint-interval`. |
 | `/zrdback status` | Config summary, blob store size, time of the last successful backup. |
+| `/zrdback config ...` | Show and change the configuration in-game. |
+|---|---|
+| `/zrdback config` | Show every setting and its current value. |
+| `/zrdback config set <key> <value>` | Change one setting and write it to `config/zrdback.properties`. |
+| `/zrdback config reset <key>` | Restore one setting to its default and write it to the file. |
+| `/zrdback config reload` | Re-read the file, picking up edits made outside the game. |
+
+`output-directory` and `threads` are used from the next server start.
+Every other setting takes effect on the next backup.
+a changed `interval-minutes` re-arms the scheduler immeadiately.
+Non-positive value means 'ignore this limit.
 
 ## Backup layout
 
@@ -275,11 +284,22 @@ retention:
 zrdback-cli list    --store DIR [--days N]   # restore points
 zrdback-cli stats   --store DIR             # store statistics
 zrdback-cli verify  --store DIR             # integrity check
-zrdback-cli prune   --store DIR --days N    # drop history older than N days
+zrdback-cli diff    --store DIR --older TS --newer TS   # compare two restore points
+zrdback-cli prune   --store DIR [--days N] [--keep N]  # drop history
 ```
 
 `verify` parses every region file, checks the chain ordering, verifies the
 blob index against the blobs on disk, and reports protocol-version mismatches.
+
+`prune` drops the history older than `--days` days and keeps the history of the
+last `--keep` restore points. A value below 1 disables that limit, so
+`prune --days 0 --keep 5` keeps the history of the last five backups
+regardless of their age. `--dry-run` reports what would be dropped without
+touching the store.
+
+The newest state of every chunk is always kept, so the list of restore points
+can still show timestamps older than the retained history - those are chunks
+that have not changed since their last backup.
 
 The CLI is published as a self-contained executable jar. copy it to a backup
 machine with no Minecraft installation and no Java build tools:

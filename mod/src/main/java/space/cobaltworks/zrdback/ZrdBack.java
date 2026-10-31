@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -52,7 +53,10 @@ public final class ZrdBack implements ModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private static final AtomicReference<BackupService> SERVICE = new AtomicReference<>();
+    private static final AtomicReference<BackupConfig> CONFIG = new AtomicReference<>();
     private static volatile ScheduledExecutorService scheduler;
+    /** The armed scheduled backup, so a changed interval can re-arm it. */
+    private static volatile ScheduledFuture<?> backupTask;
 
     /** Guards against a shutdown backup running twice (stop + stopped events). */
     private static final AtomicBoolean SHUTDOWN_BACKUP_DONE = new AtomicBoolean();
@@ -60,7 +64,7 @@ public final class ZrdBack implements ModInitializer {
     @Override
     public void onInitialize() {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
-                dispatcher.register(BackupCommands.build(SERVICE::get)));
+                dispatcher.register(BackupCommands.build(SERVICE::get, CONFIG::get, ZrdBack::reschedule)));
         ServerLifecycleEvents.SERVER_STARTED.register(ZrdBack::onServerStarted);
         ServerLifecycleEvents.SERVER_STOPPING.register(ZrdBack::onServerStopping);
         ServerLifecycleEvents.SERVER_STOPPED.register(ZrdBack::onServerStopped);
@@ -73,6 +77,7 @@ public final class ZrdBack implements ModInitializer {
             BackupConfig config = BackupConfig.load(worldRoot, server.isDedicatedServer());
             BackupService service = new BackupService(config, server);
             SERVICE.set(service);
+            CONFIG.set(config);
 
             scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
                 Thread thread = new Thread(r, "zrdback");
@@ -81,14 +86,48 @@ public final class ZrdBack implements ModInitializer {
             });
             // First pass after one full interval (an immediate pass would race
             // other startup activity; /zrdback now covers on-demand needs).
-            scheduler.scheduleWithFixedDelay(() -> runGuarded(service),
-                    config.intervalMinutes(), config.intervalMinutes(), TimeUnit.MINUTES);
+            armBackup(service, config);
 
             LOGGER.info("ZVCR Backup active: output={}, interval={} min, checkpoint-interval={}",
                     config.outputDirectory(), config.intervalMinutes(), config.checkpointInterval());
         } catch (Exception e) {
             LOGGER.error("Failed to start ZVCR Backup", e);
         }
+    }
+
+    /**
+     * Arms the scheduled backup with the given interval.
+     *
+     * <p>Replaces a previously armed task, so a changed
+     * {@code interval-minutes} takes effect without a restart.
+     */
+    private static void armBackup(BackupService service, BackupConfig config) {
+        ScheduledExecutorService current = scheduler;
+        if (current == null || current.isShutdown()) {
+            return;
+        }
+        ScheduledFuture<?> previous = backupTask;
+        if (previous != null) {
+            previous.cancel(false);
+        }
+        long interval = config.intervalMinutes();
+        backupTask = current.scheduleWithFixedDelay(() -> runGuarded(service),
+                interval, interval, TimeUnit.MINUTES);
+    }
+
+    /**
+     * Re-arms the scheduled backup after the configuration changed.
+     *
+     * <p>Only the interval is re-armed here; every other setting is read from
+     * the config object by the backup run itself and therefore applies to the
+     * next backup on its own.
+     */
+    static void reschedule(BackupConfig config) {
+        BackupService service = SERVICE.get();
+        if (config == null || service == null) {
+            return;
+        }
+        armBackup(service, config);
     }
 
     /**
@@ -173,6 +212,8 @@ public final class ZrdBack implements ModInitializer {
             }
             scheduler = null;
         }
+        backupTask = null;
+        CONFIG.set(null);
         BackupService service = SERVICE.getAndSet(null);
         if (service != null) {
             service.shutdown();

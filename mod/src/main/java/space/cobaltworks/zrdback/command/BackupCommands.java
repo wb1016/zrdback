@@ -21,8 +21,6 @@
 package space.cobaltworks.zrdback.command;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -30,19 +28,24 @@ import java.util.concurrent.CompletableFuture;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
 
 import java.nio.file.Path;
 
 import space.cobaltworks.zvcr.region.Dimension;
+import space.cobaltworks.zrdback.BackupConfig;
 import space.cobaltworks.zrdback.backup.BackupService;
 import space.cobaltworks.zrdback.backup.RestoreOptions;
 import space.cobaltworks.zrdback.backup.WorldRestorer;
+import space.cobaltworks.zrdback.store.RetentionPolicy;
+import space.cobaltworks.zrdback.store.StoreInspector;
 import space.cobaltworks.zrdback.store.StoreVerifier;
 
 /**
- * {@code /zrdback now | prune | restore | list | diff | verify | status}, moderator level required.
+ * {@code /zrdback now | prune | restore | list | diff | verify | stats | status | config},
+ * moderator level required.
  *
  * <p>Backup runs execute on the caller's executor (async); commands only
  * enqueue.
@@ -54,8 +57,19 @@ public final class BackupCommands {
 
     private BackupCommands() {}
 
+    /**
+     * Called after a setting was changed through {@code /zrdback config set},
+     * so the scheduler can pick up a new interval.
+     */
+    @FunctionalInterface
+    public interface ConfigChangeListener {
+        void onConfigChanged(BackupConfig config);
+    }
+
     public static LiteralArgumentBuilder<CommandSourceStack> build(
-            java.util.function.Supplier<BackupService> serviceSupplier) {
+            java.util.function.Supplier<BackupService> serviceSupplier,
+            java.util.function.Supplier<BackupConfig> configSupplier,
+            ConfigChangeListener configChangeListener) {
         return Commands.literal("zrdback")
                 .requires(Commands.hasPermission(Commands.LEVEL_MODERATORS))
                 .then(Commands.literal("debug-section")
@@ -90,23 +104,25 @@ public final class BackupCommands {
                             }
                             return message;
                         })))
+                // /zrdback prune <days> [nums]
+                // <days> drops history older than that many days, <nums> keeps
+                // at least that many restore points. Both limits are optional in
+                // effect: a value below 1 disables that limit.
                 .then(Commands.literal("prune")
-                        .then(Commands.argument("days", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1))
-                                .executes(context -> {
-                                    int days = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "days");
-                                    return run(context.getSource(), serviceSupplier, "Prune started", service -> {
-                                        BackupService.Result result = service.prune(days);
-                                        return "Prune finished: " + result.regionsScanned() + " files scanned, "
-                                                + result.chunksChanged() + " entries removed in "
-                                                + result.durationMs() + " ms";
-                                    });
-                                })))
+                        .then(Commands.argument("days", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
+                                .executes(context -> prune(context.getSource(), serviceSupplier,
+                                        com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "days"),
+                                        0))
+                                .then(Commands.argument("nums", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
+                                        .executes(context -> prune(context.getSource(), serviceSupplier,
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "days"),
+                                                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "nums"))))))
                 .then(Commands.literal("restore")
                         .then(Commands.literal("latest").executes(context ->
                                 run(context.getSource(), serviceSupplier, "Restore started", service ->
                                         restoreMessage(service.restore(java.time.Instant.now().getEpochSecond(),
                                                 RestoreOptions.all())))))
-                        .then(Commands.argument("timestamp", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                        .then(Commands.argument("timestamp", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
                                 .executes(context -> {
                                     long ts = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "timestamp");
                                     return run(context.getSource(), serviceSupplier, "Restore started", service ->
@@ -140,13 +156,13 @@ public final class BackupCommands {
                                                             restoreMessage(service.restore(ts, RestoreOptions.playerDataOnly(name))));
                                                 })))))
                 .then(Commands.literal("diff")
-                        .then(Commands.argument("older", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
-                                .then(Commands.argument("newer", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                        .then(Commands.argument("older", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
+                                .then(Commands.argument("newer", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
                                         .executes(context -> {
                                             long older = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "older");
                                             long newer = com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "newer");
                                             return run(context.getSource(), serviceSupplier, "Diff started", service -> {
-                                                BackupService.Diff diff = service.diff(older, newer);
+                                                StoreInspector.Diff diff = service.diff(older, newer);
                                                 return "Diff " + older + " -> " + newer + ": "
                                                         + diff.chunksChanged() + " chunk(s) changed, "
                                                         + diff.chunksOnlyInNew() + " only in the newer point, "
@@ -171,7 +187,7 @@ public final class BackupCommands {
                         })))
                 .then(Commands.literal("stats").executes(context ->
                         run(context.getSource(), serviceSupplier, "Stats started", service -> {
-                            BackupService.Stats s = service.stats();
+                            StoreInspector.Stats s = service.stats();
                             return ("Stats: files=%d (%d KiB), segments=%d, chains=%d "
                                     + "(entries %d, avg %.1f, min %d, max %d), teDeltas=%d, "
                                     + "palettes %d distinct / %d refs (%.1f%% dedup), "
@@ -185,22 +201,22 @@ public final class BackupCommands {
                 .then(Commands.literal("list")
                         .executes(context -> executeList(context.getSource(), serviceSupplier,
                                 0, 0, 0, LIST_DEFAULT_KEEP))
-                        .then(Commands.argument("min-days", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                        .then(Commands.argument("min-days", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
                                 .executes(context -> executeList(context.getSource(), serviceSupplier,
                                         com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
                                         0, 0, LIST_DEFAULT_KEEP))
-                                .then(Commands.argument("max-days", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                .then(Commands.argument("max-days", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
                                         .executes(context -> executeList(context.getSource(), serviceSupplier,
                                                 com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
                                                 com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "max-days"),
                                                 0, LIST_DEFAULT_KEEP))
-                                        .then(Commands.argument("skip-nums", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                        .then(Commands.argument("skip-nums", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
                                                 .executes(context -> executeList(context.getSource(), serviceSupplier,
                                                         com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
                                                         com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "max-days"),
                                                         com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "skip-nums"),
                                                         LIST_DEFAULT_KEEP))
-                                                .then(Commands.argument("keep-nums", com.mojang.brigadier.arguments.IntegerArgumentType.integer(0))
+                                                .then(Commands.argument("keep-nums", com.mojang.brigadier.arguments.IntegerArgumentType.integer())
                                                         .executes(context -> executeList(context.getSource(), serviceSupplier,
                                                                 com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "min-days"),
                                                                 com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "max-days"),
@@ -214,7 +230,28 @@ public final class BackupCommands {
                     context.getSource().sendSuccess(() -> Component.literal(
                             service.statusLine()), false);
                     return 1;
-                }));
+                }))
+                .then(Commands.literal("config")
+                        .executes(context -> showConfig(context.getSource(), configSupplier))
+                        .then(Commands.literal("set")
+                                .then(Commands.argument("key", com.mojang.brigadier.arguments.StringArgumentType.word())
+                                        .suggests((context, builder) ->
+                                                SharedSuggestionProvider.suggest(BackupConfig.KEYS, builder))
+                                        .then(Commands.argument("value",
+                                                        com.mojang.brigadier.arguments.StringArgumentType.greedyString())
+                                                .executes(context -> setConfig(context.getSource(),
+                                                        configSupplier, configChangeListener,
+                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "key"),
+                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "value"))))))
+                        .then(Commands.literal("reset")
+                                .then(Commands.argument("key", com.mojang.brigadier.arguments.StringArgumentType.word())
+                                        .suggests((context, builder) ->
+                                                SharedSuggestionProvider.suggest(BackupConfig.KEYS, builder))
+                                        .executes(context -> resetConfig(context.getSource(),
+                                                configSupplier, configChangeListener,
+                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "key")))))
+                        .then(Commands.literal("reload")
+                                .executes(context -> reloadConfig(context.getSource(), configSupplier))));
     }
 
     private static String restoreMessage(WorldRestorer.Result result) {
@@ -236,6 +273,126 @@ public final class BackupCommands {
         return message;
     }
 
+    /**
+     * Runs a prune under the given limits.
+     *
+     * <p>A limit below 1 is ignored, so {@code prune 0 5} keeps the last five
+     * restore points regardless of their age, and {@code prune 7 0} drops
+     * everything older than seven days. With both limits disabled there is
+     * nothing to prune, and the store is left alone.
+     */
+    private static int prune(CommandSourceStack source,
+                             java.util.function.Supplier<BackupService> serviceSupplier,
+                             int days, int nums) {
+        RetentionPolicy policy = new RetentionPolicy(days, nums);
+        if (policy.isUnbounded()) {
+            source.sendFailure(Component.literal(
+                    "nothing to prune: give the number of days to keep, the number of snapshots "
+                            + "to keep, or both (a value below 1 disables that limit)"));
+            return 0;
+        }
+        return run(source, serviceSupplier, "Prune started", service -> {
+            BackupService.Result result = service.prune(policy);
+            return "Prune finished: " + result.regionsScanned() + " files scanned, "
+                    + result.chunksChanged() + " entries removed in "
+                    + result.durationMs() + " ms (" + policy.describe() + ")";
+        });
+    }
+
+    /** Shows every setting and its current value. */
+    private static int showConfig(CommandSourceStack source,
+                                  java.util.function.Supplier<BackupConfig> configSupplier) {
+        BackupConfig config = requireConfig(source, configSupplier);
+        if (config == null) {
+            return 0;
+        }
+        StringBuilder sb = new StringBuilder("ZVCR Backup config (")
+                .append(config.configFile()).append("):");
+        for (String key : BackupConfig.KEYS) {
+            sb.append("\n  ").append(key).append(" = ").append(config.describe(key));
+            if (BackupConfig.RESTART_REQUIRED.contains(key)) {
+                sb.append(" [restart required]");
+            }
+        }
+        source.sendSuccess(() -> Component.literal(sb.toString()), false);
+        return 1;
+    }
+
+    /** Changes one setting and writes it to the config file. */
+    private static int setConfig(CommandSourceStack source,
+                                 java.util.function.Supplier<BackupConfig> configSupplier,
+                                 ConfigChangeListener configChangeListener,
+                                 String key, String value) {
+        BackupConfig config = requireConfig(source, configSupplier);
+        if (config == null) {
+            return 0;
+        }
+        try {
+            config.set(key, value);
+        } catch (IllegalArgumentException e) {
+            source.sendFailure(Component.literal(e.getMessage()));
+            return 0;
+        } catch (IOException e) {
+            source.sendFailure(Component.literal(
+                    "could not write " + config.configFile() + ": " + e.getMessage()));
+            return 0;
+        }
+        configChangeListener.onConfigChanged(config);
+        source.sendSuccess(() -> Component.literal(
+                "Config " + key + " = " + config.describe(key)
+                        + (BackupConfig.RESTART_REQUIRED.contains(key)
+                        ? " (takes effect after the next restart)" : "")),
+                true);
+        return 1;
+    }
+
+    /** Restores one setting to its default and writes the config file. */
+    private static int resetConfig(CommandSourceStack source,
+                                    java.util.function.Supplier<BackupConfig> configSupplier,
+                                    ConfigChangeListener configChangeListener,
+                                    String key) {
+        BackupConfig config = requireConfig(source, configSupplier);
+        if (config == null) {
+            return 0;
+        }
+        try {
+            config.reset(key);
+        } catch (IllegalArgumentException e) {
+            source.sendFailure(Component.literal(e.getMessage()));
+            return 0;
+        } catch (IOException e) {
+            source.sendFailure(Component.literal(
+                    "could not write " + config.configFile() + ": " + e.getMessage()));
+            return 0;
+        }
+        configChangeListener.onConfigChanged(config);
+        source.sendSuccess(() -> Component.literal(
+                "Config " + key + " reset to " + config.describe(key)
+                        + (BackupConfig.RESTART_REQUIRED.contains(key)
+                        ? " (takes effect after the next restart)" : "")),
+                true);
+        return 1;
+    }
+
+    /** Re-reads the config file, picking up edits made outside the game. */
+    private static int reloadConfig(CommandSourceStack source,
+                                    java.util.function.Supplier<BackupConfig> configSupplier) {
+        BackupConfig config = requireConfig(source, configSupplier);
+        if (config == null) {
+            return 0;
+        }
+        try {
+            config.reload();
+        } catch (IOException | RuntimeException e) {
+            source.sendFailure(Component.literal(
+                    "could not read " + config.configFile() + ": " + e.getMessage()));
+            return 0;
+        }
+        source.sendSuccess(() -> Component.literal("Config reloaded from " + config.configFile()),
+                true);
+        return 1;
+    }
+
     private static BackupService requireService(CommandSourceStack source,
                                                 java.util.function.Supplier<BackupService> supplier) {
         BackupService service = supplier.get();
@@ -243,6 +400,15 @@ public final class BackupCommands {
             source.sendFailure(Component.literal("ZVCR Backup is not running"));
         }
         return service;
+    }
+
+    private static BackupConfig requireConfig(CommandSourceStack source,
+                                              java.util.function.Supplier<BackupConfig> supplier) {
+        BackupConfig config = supplier.get();
+        if (config == null) {
+            source.sendFailure(Component.literal("ZVCR Backup is not running"));
+        }
+        return config;
     }
 
     private static void debugSection(CommandSourceStack source, int localX, int localZ, int sectionY) {
@@ -276,12 +442,12 @@ public final class BackupCommands {
                     long nonZeroLongs = java.util.Arrays.stream(data).filter(v -> v != 0).count();
                     source.sendSystemMessage(Component.literal(
                             "section Y=" + sectionY + " paletteSize=" + palette.size()
-                            + " dataLongs=" + data.length + " nonZeroLongs=" + nonZeroLongs
-                            + " data[0..3]=" + java.util.Arrays.toString(java.util.Arrays.copyOfRange(data, 0, Math.min(4, data.length)))
-                            + " palette=[" + names + "]"));
+                                    + " dataLongs=" + data.length + " nonZeroLongs=" + nonZeroLongs
+                                    + " data[0..3]=" + java.util.Arrays.toString(java.util.Arrays.copyOfRange(data, 0, Math.min(4, data.length)))
+                                    + " palette=[" + names + "]"));
                     return;
                 }
-                source.sendSystemMessage(Component.literal("section Y=" + sectionY + " not found (" + sections.size() + " sections)"));
+                source.sendSystemMessage(Component.literal("debug failed: no section with Y=" + sectionY));
             }
         } catch (Exception e) {
             source.sendSystemMessage(Component.literal("debug failed: " + e));
@@ -291,7 +457,7 @@ public final class BackupCommands {
     /**
      * {@code /zrdback list [min-days] [max-days] [skip-nums] [keep-nums]}
      * lists restore-point timestamps. Omitted args: min 0, max unbounded
-     * (also when given as 0), skip 0, keep {@value #LIST_DEFAULT_KEEP}.
+     * (also when given as 0 or less), skip 0, keep {@value #LIST_DEFAULT_KEEP}.
      */
     private static int executeList(CommandSourceStack source,
                                    java.util.function.Supplier<BackupService> serviceSupplier,

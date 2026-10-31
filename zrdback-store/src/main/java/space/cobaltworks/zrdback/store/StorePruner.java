@@ -22,6 +22,8 @@ package space.cobaltworks.zrdback.store;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 import space.cobaltworks.zvcr.io.ZvcrFiles;
@@ -63,6 +65,55 @@ public final class StorePruner {
     }
 
     /**
+     * Prunes a store according to a retention policy.
+     *
+     * <p>An unbounded policy is a no-op: nothing is written and nothing is
+     * removed.
+     *
+     * @return the number of removed chain/blob entries
+     */
+    public static int prune(Path storeRoot, RetentionPolicy policy, boolean dryRun)
+            throws IOException {
+        if (policy.isUnbounded()) {
+            return 0;
+        }
+        return prune(storeRoot, cutoff(storeRoot, policy, System.currentTimeMillis() / 1000), dryRun);
+    }
+
+    /**
+     * The oldest timestamp a prune under this policy keeps.
+     *
+     * <p>The age limit gives a cutoff of {@code now - days * 86400}. The
+     * snapshot limit gives the timestamp of the N-th newest restore point:
+     * every entry at or after it survives, so at least N restore points stay
+     * restorable. The stricter of the two cutoffs wins.
+     *
+     * @param now the current unix time in seconds
+     * @return the cutoff, {@link Long#MIN_VALUE} when nothing may be pruned
+     */
+    public static long cutoff(Path storeRoot, RetentionPolicy policy, long now)
+            throws IOException {
+        long ageCutoff = policy.hasAgeLimit() ? now - policy.days() * 86400L : Long.MIN_VALUE;
+        long snapshotCutoff = policy.hasSnapshotLimit()
+                ? nthNewestTimestamp(storeRoot, policy.snapshots())
+                : Long.MIN_VALUE;
+        return Math.max(ageCutoff, snapshotCutoff);
+    }
+
+    /**
+     * The timestamp of the N-th newest restore point, or {@link Long#MIN_VALUE}
+     * when the store holds fewer than N of them (nothing may be dropped).
+     */
+    private static long nthNewestTimestamp(Path storeRoot, int n) throws IOException {
+        List<Long> newestFirst = new ArrayList<>(timestamps(storeRoot));
+        newestFirst.sort(Comparator.reverseOrder());
+        if (newestFirst.size() < n) {
+            return Long.MIN_VALUE;
+        }
+        return newestFirst.get(n - 1);
+    }
+
+    /**
      * Prunes one region file: drops chain, tile-entity and segment-state
      * entries older than {@code cutoff}.
      *
@@ -92,8 +143,20 @@ public final class StorePruner {
         return removed;
     }
 
-    /** The restore points (timestamps) present in a store. */
-    public static java.util.Set<Long> timestamps(Path storeRoot) throws IOException {
-        return FileBlobStore.open(storeRoot).timestamps();
+    /**
+     * The restore points (timestamps) present in a store: every chain,
+     * tile-entity and segment-state timestamp of every {@code .zvcr3d} file,
+     * plus the blob-store history timestamps.
+     *
+     * <p>This is the same set {@code /zrdback list} shows, and it is what the
+     * snapshot-count retention limit counts.
+     */
+    public static java.util.TreeSet<Long> timestamps(Path storeRoot) throws IOException {
+        java.util.TreeSet<Long> stamps = new java.util.TreeSet<>();
+        for (Path file : StoreLayout.regionFiles(storeRoot)) {
+            stamps.addAll(TimestampSidecar.timestampsFor(file));
+        }
+        stamps.addAll(FileBlobStore.open(storeRoot).timestamps());
+        return stamps;
     }
 }

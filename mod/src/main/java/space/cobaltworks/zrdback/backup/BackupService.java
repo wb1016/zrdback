@@ -51,18 +51,18 @@ import space.cobaltworks.zvcr.format.DeltaInsertionResult;
 import space.cobaltworks.zvcr.format.PackedData;
 import space.cobaltworks.zvcr.format.PackedDeltaData;
 import space.cobaltworks.zvcr.format.PackedSnapshot;
-import space.cobaltworks.zvcr.io.ZstdCodec;
 import space.cobaltworks.zvcr.io.ZvcrFiles;
 import space.cobaltworks.zvcr.io.ZvcrWriter;
 import space.cobaltworks.zvcr.region.Dimension;
 import space.cobaltworks.zvcr.region.RegionLocation;
 import space.cobaltworks.zvcr.region.Segment;
-import space.cobaltworks.zvcr.region.TileEntityHistory;
-import space.cobaltworks.zvcr.region.TileEntityListDelta;
 import space.cobaltworks.zvcr.region.ZvcrFile;
 import space.cobaltworks.zrdback.store.EpochSidecar;
 import space.cobaltworks.zrdback.store.FileBlobStore;
 import space.cobaltworks.zrdback.store.RegistryManifest;
+import space.cobaltworks.zrdback.store.RetentionPolicy;
+import space.cobaltworks.zrdback.store.StoreInspector;
+import space.cobaltworks.zrdback.store.StorePruner;
 import space.cobaltworks.zrdback.store.TimestampSidecar;
 import space.cobaltworks.zrdback.BackupConfig;
 
@@ -151,279 +151,23 @@ public final class BackupService {
      * dedup effectiveness, blob store size. Used to tune the checkpoint
      * interval.
      */
-    public Stats stats() throws IOException {
-        int files = 0;
-        long fileBytes = 0;
-        int segments = 0;
-        int chains = 0;
-        long chainEntries = 0;
-        int minChain = Integer.MAX_VALUE;
-        int maxChain = 0;
-        long teDeltas = 0;
-        java.util.Set<space.cobaltworks.zvcr.format.Palette> distinctPalettes = new java.util.HashSet<>();
-        long paletteRefs = 0;
-
-        for (Dimension dimension : Dimension.values()) {
-            Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
-            if (!Files.isDirectory(dimDir)) {
-                continue;
-            }
-            try (Stream<Path> walk = Files.walk(dimDir)) {
-                for (Path file : walk.filter(f -> f.getFileName().toString().endsWith(".zvcr3d")).toList()) {
-                    files++;
-                    fileBytes += Files.size(file);
-                    ZvcrFile zvcr = ZvcrFiles.readFile(file);
-                    for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
-                        Segment segment = zvcr.region.get(i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
-                                i % Zvcr.REGION_SIDELENGTH_SEGMENTS).orElse(null);
-                        if (segment == null) {
-                            continue;
-                        }
-                        segments++;
-                        teDeltas += segment.tileEntities.size();
-                        for (int s = 0; s < segment.sectionCount; s++) {
-                            for (PackedDeltaData chain : new PackedDeltaData[] {
-                                    segment.blockSections.section(s),
-                                    segment.biomeSections.section(s)}) {
-                                int size = chain.reverseDeltas().size();
-                                if (size == 0) {
-                                    continue;
-                                }
-                                chains++;
-                                chainEntries += size;
-                                minChain = Math.min(minChain, size);
-                                maxChain = Math.max(maxChain, size);
-                                for (var snapshot : chain.reverseDeltas()) {
-                                    if (snapshot.data() instanceof PackedData.Paletted paletted) {
-                                        paletteRefs++;
-                                        distinctPalettes.add(paletted.palette());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (minChain == Integer.MAX_VALUE) {
-            minChain = 0;
-        }
-        FileBlobStore blobs = FileBlobStore.open(config.outputDirectory());
-        return new Stats(files, fileBytes, segments, chains, chainEntries, minChain, maxChain,
-                teDeltas, distinctPalettes.size(), paletteRefs,
-                blobs.trackedFileCount(), blobs.blobCount(), blobs.blobBytes());
+    public StoreInspector.Stats stats() throws IOException {
+        return StoreInspector.stats(config.outputDirectory());
     }
 
-    public record Stats(int files, long fileBytes, int segments, int chains, long chainEntries,
-                        int minChain, int maxChain, long teDeltas,
-                        long distinctPalettes, long paletteRefs,
-                        int trackedFiles, int blobCount, long blobBytes) {
-        public double avgChain() {
-            return chains == 0 ? 0 : (double) chainEntries / chains;
-        }
-
-        /** Fraction of paletted snapshots sharing a deduplicated palette. */
-        public double paletteDedupRatio() {
-            return paletteRefs == 0 ? 1.0 : (double) distinctPalettes / paletteRefs;
-        }
+    /**
+     * Compares two restore points.
+     *
+     * @param older the earlier timestamp
+     * @param newer the later timestamp
+     */
+    public StoreInspector.Diff diff(long older, long newer) throws IOException {
+        return StoreInspector.diff(config.outputDirectory(), older, newer);
     }
 
     /** One page of {@code /zrdback list} output. */
     public record BackupList(long queriedAt, int totalStore, int totalInRange, int skipped,
                              List<Long> timestamps, long durationMs) {}
-
-    /**
-     * What changed between two restore points.
-     *
-     * @param chunksChanged chunks whose content differs between the two points
-     * @param chunksOnlyInNew chunks that exist only in the newer point
-     * @param chunksOnlyInOld chunks that exist only in the older point
-     * @param filesChanged auxiliary files whose content differs
-     * @param durationMs how long the comparison took
-     */
-    public record Diff(int chunksChanged, int chunksOnlyInNew, int chunksOnlyInOld,
-                        int filesChanged, long durationMs) {}
-
-    /**
-     * Compares two restore points.
-     *
-     * <p>Chunks are compared through their stored chains: a chunk counts as
-     * changed when its reconstructed state differs between the two timestamps.
-     * The comparison is per chunk and per section, so it is exact but costs
-     * one reconstruction per chunk. fine for an operator-initiated command,
-     * too slow for a periodic job.
-     *
-     * @param older the earlier timestamp
-     * @param newer the later timestamp
-     */
-    public Diff diff(long older, long newer) throws IOException {
-        long start = System.currentTimeMillis();
-        if (older > newer) {
-            long swap = older;
-            older = newer;
-            newer = swap;
-        }
-        int changed = 0;
-        int onlyNew = 0;
-        int onlyOld = 0;
-
-        for (Dimension dimension : Dimension.values()) {
-            Path dimDir = config.outputDirectory().resolve(dimension.directoryName);
-            if (!Files.isDirectory(dimDir)) {
-                continue;
-            }
-            try (Stream<Path> files = Files.walk(dimDir)) {
-                for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".zvcr3d")).toList()) {
-                    ZvcrFile zvcr = ZvcrFiles.readFile(file);
-                    for (int i = 0; i < Zvcr.SEGMENTS_PER_REGION; i++) {
-                        Segment segment = zvcr.region.get(
-                                i / Zvcr.REGION_SIDELENGTH_SEGMENTS,
-                                i % Zvcr.REGION_SIDELENGTH_SEGMENTS).orElse(null);
-                        if (segment == null) {
-                            continue;
-                        }
-                        ChunkState oldState = chunkState(segment, older);
-                        ChunkState newState = chunkState(segment, newer);
-                        if (oldState == null && newState == null) {
-                            continue;
-                        }
-                        if (oldState == null) {
-                            onlyNew++;
-                        } else if (newState == null) {
-                            onlyOld++;
-                        } else if (!oldState.equals(newState)) {
-                            changed++;
-                        }
-                    }
-                }
-            }
-        }
-
-        int filesChanged = diffFiles(older, newer);
-        return new Diff(changed, onlyNew, onlyOld, filesChanged,
-                System.currentTimeMillis() - start);
-    }
-
-    /**
-     * The reconstructed state of one chunk at a timestamp: the block and biome
-     * section contents plus the tile-entity list.
-     */
-    record ChunkState(int[] blocks, int[] biomes, int tileEntities) {
-
-        @Override
-        public boolean equals(Object o) {
-            return o instanceof ChunkState other
-                    && java.util.Arrays.equals(blocks, other.blocks)
-                    && java.util.Arrays.equals(biomes, other.biomes)
-                    && tileEntities == other.tileEntities;
-        }
-
-        @Override
-        public int hashCode() {
-            return java.util.Arrays.hashCode(blocks) * 31
-                    + java.util.Arrays.hashCode(biomes) * 31 + tileEntities;
-        }
-    }
-
-    /**
-     * The state of a chunk at {@code timestamp}, or null when it had none.
-     *
-     * <p>{@code snapshotBefore} clamps to the oldest known state, so it cannot
-     * answer "the chunk did not exist yet". Each chain is therefore checked
-     * against its own oldest entry: a chain whose oldest entry is newer than
-     * the queried timestamp contributes nothing.
-     */
-    static ChunkState chunkState(Segment segment, long timestamp) {
-        java.util.List<int[]> blocks = new java.util.ArrayList<>();
-        java.util.List<int[]> biomes = new java.util.ArrayList<>();
-        boolean any = false;
-        for (int s = 0; s < segment.sectionCount; s++) {
-            PackedDeltaData blockChain = segment.blockSections.section(s);
-            if (hadStateBefore(blockChain, timestamp)) {
-                blocks.add(blockChain.snapshotBefore(timestamp).orElseThrow());
-                any = true;
-            }
-            PackedDeltaData biomeChain = segment.biomeSections.section(s);
-            if (hadStateBefore(biomeChain, timestamp)) {
-                biomes.add(biomeChain.snapshotBefore(timestamp).orElseThrow());
-                any = true;
-            }
-        }
-        int tileEntities = -1;
-        if (hadTileStateBefore(segment.tileEntities, timestamp)) {
-            tileEntities = segment.tileEntities.snapshotBefore(timestamp)
-                    .map(Map::size).orElse(0);
-            any = true;
-        }
-        if (!any) {
-            return null;
-        }
-        return new ChunkState(concat(blocks), concat(biomes), tileEntities);
-    }
-
-    /** True when the chain holds a state at or before {@code timestamp}. */
-    private static boolean hadStateBefore(PackedDeltaData chain, long timestamp) {
-        java.util.List<PackedSnapshot> entries = chain.reverseDeltas();
-        if (entries.isEmpty()) {
-            return false;
-        }
-        // The chain is newest-first, so the last entry is the oldest state.
-        return entries.get(entries.size() - 1).timestamp() <= timestamp;
-    }
-
-    /** True when the tile-entity history holds a state at or before {@code timestamp}. */
-    private static boolean hadTileStateBefore(TileEntityHistory history, long timestamp) {
-        java.util.List<TileEntityListDelta> entries = history.reverseDeltas();
-        if (entries.isEmpty()) {
-            return false;
-        }
-        return entries.get(entries.size() - 1).timestamp() <= timestamp;
-    }
-
-    private static int[] concat(List<int[]> parts) {
-        int total = 0;
-        for (int[] part : parts) {
-            total += part.length;
-        }
-        int[] out = new int[total];
-        int offset = 0;
-        for (int[] part : parts) {
-            System.arraycopy(part, 0, out, offset, part.length);
-            offset += part.length;
-        }
-        return out;
-    }
-
-    /** Counts the auxiliary files whose content differs between two points. */
-    private int diffFiles(long older, long newer) {
-        try {
-            FileBlobStore blobs = FileBlobStore.open(config.outputDirectory());
-            Map<String, List<FileBlobStore.Entry>> tracked = blobs.trackedEntries();
-            int changed = 0;
-            for (Map.Entry<String, List<FileBlobStore.Entry>> file : tracked.entrySet()) {
-                String oldHash = hashAt(file.getValue(), older);
-                String newHash = hashAt(file.getValue(), newer);
-                if (!java.util.Objects.equals(oldHash, newHash)) {
-                    changed++;
-                }
-            }
-            return changed;
-        } catch (IOException e) {
-            LOGGER.warn("could not compare auxiliary files: " + e);
-            return 0;
-        }
-    }
-
-    /** The content hash of a file's newest entry at or before {@code timestamp}. */
-    private static String hashAt(List<FileBlobStore.Entry> history, long timestamp) {
-        FileBlobStore.Entry best = null;
-        for (FileBlobStore.Entry entry : history) {
-            if (entry.timestamp() <= timestamp && (best == null || entry.timestamp() > best.timestamp())) {
-                best = entry;
-            }
-        }
-        return best == null ? null : best.hash();
-    }
 
     /**
      * Lists restore points: newest first, restricted to backups whose age at
@@ -761,8 +505,9 @@ public final class BackupService {
         int blobsStored = backupAuxiliaryFiles(worldRoot, backupTimestamp);
 
         int pruned = 0;
-        if (config.retentionDays() > 0) {
-            pruned = prune(config.retentionDays()).chunksChanged();
+        RetentionPolicy retention = config.retentionPolicy();
+        if (!retention.isUnbounded()) {
+            pruned = prune(retention).chunksChanged();
         }
         return new Result(tasks.size(), (int) changed, (int) inserted, blobsStored, pruned,
                 regionsSkipped, regionsFailed, System.currentTimeMillis() - start);
@@ -972,23 +717,24 @@ public final class BackupService {
         return stored;
     }
 
-    /** Prunes chain entries and blob history older than {@code retentionDays}. */
-    public Result prune(int retentionDays) throws IOException {
+    /** Prunes chain entries and blob history under the given retention policy. */
+    public Result prune(RetentionPolicy policy) throws IOException {
         // Same single-flight guard as runBackup: both rewrite .zvcr3d files,
         // and interleaved read-modify-write passes would lose updates.
         if (!mutationLock.tryLock()) {
             throw new StoreBusyException("Another backup or prune is already running");
         }
         try {
-            return pruneLocked(retentionDays);
+            return pruneLocked(policy);
         } finally {
             mutationLock.unlock();
         }
     }
 
-    private Result pruneLocked(int retentionDays) throws IOException {
+    private Result pruneLocked(RetentionPolicy policy) throws IOException {
         long start = System.currentTimeMillis();
-        long cutoff = Instant.now().getEpochSecond() - retentionDays * 86400L;
+        long cutoff = StorePruner.cutoff(config.outputDirectory(), policy,
+                Instant.now().getEpochSecond());
 
         List<Path> files = new ArrayList<>();
         for (Dimension dimension : Dimension.values()) {

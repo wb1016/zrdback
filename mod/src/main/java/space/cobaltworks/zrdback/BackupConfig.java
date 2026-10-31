@@ -24,14 +24,26 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
+import java.util.Set;
 
 import net.fabricmc.loader.api.FabricLoader;
 
+import space.cobaltworks.zvcr.io.ZvcrFiles;
+import space.cobaltworks.zrdback.store.RetentionPolicy;
 import space.cobaltworks.zrdback.store.StoreFormat;
+import space.cobaltworks.zrdback.store.StoreLayout;
 
 /**
- * Minimal config surface (v1): {@code config/zrdback.properties}.
+ * The mod's configuration ({@code config/zrdback.properties}).
+ *
+ * <p>The file can be edited by hand, but every setting can also be changed
+ * from inside the game with {@code /zrdback config set <key> <value>}; both
+ * write the same file, and the in-game form validates the value before it is
+ * applied.
  *
  * <ul>
  *   <li>{@code output-directory} - backup storage root; empty = sibling
@@ -39,15 +51,20 @@ import space.cobaltworks.zrdback.store.StoreFormat;
  *       folder itself is never written to). On an integrated server
  *       (singleplayer/LAN) the store is scoped per save:
  *       {@code <root>/<world-folder-name>/}, because the world save's parent is
- *       the shared {@code saves/} directory of the whole instance.</li>
+ *       the shared {@code saves/} directory of the whole instance. Changing this
+ *       needs a restart: the running service would otherwise keep writing into
+ *       the old store while reading the new one.</li>
  *   <li>{@code interval-minutes} - hourly cadence by default.</li>
  *   <li>{@code checkpoint-interval} - full snapshot every N deltas per chain.</li>
  *   <li>{@code retention-days} - drop history older than N days; 0 = keep
  *       forever. The chain is continuous, so retention only ever removes
  *       the oldest snapshots - it never creates a second chain.</li>
+ *   <li>{@code retention-snapshots} - keep at least N restore points, no matter
+ *       how old they are; 0 = the count does not constrain retention.</li>
  *   <li>{@code threads} - worker threads for backup/prune; 0 = auto (half the
  *       cores, min 1). Workers run at minimum priority so ticks are served
- *       first. Region files are independent, so they process in parallel.</li>
+ *       first. Region files are independent, so they process in parallel.
+ *       Changing this needs a restart: the worker pool is sized at startup.</li>
  *   <li>{@code backup-on-stop} - run a final backup while the server shuts
  *       down, capturing the state that the exit save would otherwise leave
  *       behind.</li>
@@ -56,6 +73,9 @@ import space.cobaltworks.zrdback.store.StoreFormat;
  *   <li>{@code dimensions} - comma-separated dimensions to back up
  *       ({@code overworld,nether,end}); empty = all.</li>
  * </ul>
+ *
+ * <p>The settings are read by the backup worker threads, so every field is
+ * volatile and a change becomes visible to the next backup without a restart.
  */
 public final class BackupConfig {
 
@@ -68,31 +88,87 @@ public final class BackupConfig {
     /** Zstd level used for the rarer prune rewrites (smaller files). */
     public static final int COMPRESSION_LEVEL_PRUNE = 8;
 
-    private final Path outputDirectory;
-    private final int intervalMinutes;
-    private final int checkpointInterval;
-    private final int retentionDays;
-    private final int threads;
-    private final boolean backupOnStop;
-    private final int compressionLevel;
-    private final java.util.Set<String> dimensions;
+    public static final String KEY_OUTPUT_DIRECTORY = "output-directory";
+    public static final String KEY_INTERVAL_MINUTES = "interval-minutes";
+    public static final String KEY_CHECKPOINT_INTERVAL = "checkpoint-interval";
+    public static final String KEY_RETENTION_DAYS = "retention-days";
+    public static final String KEY_RETENTION_SNAPSHOTS = "retention-snapshots";
+    public static final String KEY_THREADS = "threads";
+    public static final String KEY_BACKUP_ON_STOP = "backup-on-stop";
+    public static final String KEY_COMPRESSION_LEVEL = "compression-level";
+    public static final String KEY_DIMENSIONS = "dimensions";
 
-    private BackupConfig(Path outputDirectory, int intervalMinutes, int checkpointInterval,
-                         int retentionDays, int threads, boolean backupOnStop,
-                         int compressionLevel, java.util.Set<String> dimensions) {
-        this.outputDirectory = outputDirectory;
-        this.intervalMinutes = intervalMinutes;
-        this.checkpointInterval = checkpointInterval;
-        this.retentionDays = retentionDays;
-        this.threads = threads;
-        this.backupOnStop = backupOnStop;
-        this.compressionLevel = compressionLevel;
-        this.dimensions = dimensions;
+    /** Every settable key, in the order they are displayed. */
+    public static final List<String> KEYS = List.of(
+            KEY_OUTPUT_DIRECTORY,
+            KEY_INTERVAL_MINUTES,
+            KEY_CHECKPOINT_INTERVAL,
+            KEY_RETENTION_DAYS,
+            KEY_RETENTION_SNAPSHOTS,
+            KEY_THREADS,
+            KEY_BACKUP_ON_STOP,
+            KEY_COMPRESSION_LEVEL,
+            KEY_DIMENSIONS);
+
+    /**
+     * Settings whose change only takes effect after a server restart: the
+     * store root is resolved once at startup, and the worker pool is sized
+     * once at startup.
+     */
+    public static final Set<String> RESTART_REQUIRED =
+            Set.of(KEY_OUTPUT_DIRECTORY, KEY_THREADS);
+
+    private final Path configFile;
+    private final Path worldRoot;
+    private final boolean dedicatedServer;
+    /** Guards the mutation of the settings as a whole. */
+    private final Object lock = new Object();
+
+    private volatile String outputDirectorySetting;
+    /**
+     * A new output directory that was set at runtime. It is written to the
+     * config file but not applied to the running store: the store root is
+     * resolved once at startup, and switching it mid-flight would leave the
+     * old and the new store half-used.
+     */
+    private volatile String pendingOutputDirectory;
+    private volatile Path storeRoot;
+    private volatile int intervalMinutes;
+    private volatile int checkpointInterval;
+    private volatile int retentionDays;
+    private volatile int retentionSnapshots;
+    private volatile int threads;
+    private volatile boolean backupOnStop;
+    private volatile int compressionLevel;
+    private volatile Set<String> dimensions;
+
+    private BackupConfig(Path configFile, Path worldRoot, boolean dedicatedServer) {
+        this.configFile = configFile;
+        this.worldRoot = worldRoot;
+        this.dedicatedServer = dedicatedServer;
     }
 
     public static BackupConfig load(Path worldRoot, boolean dedicatedServer) {
-        Path configDir = FabricLoader.getInstance().getConfigDir();
-        Path configFile = configDir.resolve("zrdback.properties");
+        Path configFile = FabricLoader.getInstance().getConfigDir().resolve("zrdback.properties");
+        return load(configFile, worldRoot, dedicatedServer);
+    }
+
+    /**
+     * Loads the config from an explicit file. The file need not exist: every
+     * setting then takes its default value.
+     */
+    public static BackupConfig load(Path configFile, Path worldRoot, boolean dedicatedServer) {
+        BackupConfig config = new BackupConfig(configFile, worldRoot, dedicatedServer);
+        config.readFromDisk();
+        return config;
+    }
+
+    /** The file this config is (or would be) stored in. */
+    public Path configFile() {
+        return configFile;
+    }
+
+    private void readFromDisk() {
         Properties props = new Properties();
         if (Files.isRegularFile(configFile)) {
             try (InputStream in = Files.newInputStream(configFile)) {
@@ -101,37 +177,217 @@ public final class BackupConfig {
                 throw new IllegalStateException("Failed to read " + configFile, e);
             }
         }
-        String output = props.getProperty("output-directory", "").trim();
+        synchronized (lock) {
+            outputDirectorySetting = props.getProperty(KEY_OUTPUT_DIRECTORY, "").trim();
+            pendingOutputDirectory = null;
+            storeRoot = resolveStoreRoot(baseDirectory(outputDirectorySetting),
+                    normalizedWorldRoot(), dedicatedServer);
+            warnAboutLegacyStore();
+            intervalMinutes = parsePositive(KEY_INTERVAL_MINUTES,
+                    props.getProperty(KEY_INTERVAL_MINUTES), 60);
+            checkpointInterval = parsePositive(KEY_CHECKPOINT_INTERVAL,
+                    props.getProperty(KEY_CHECKPOINT_INTERVAL), 32);
+            // 0 disables automatic pruning (manual /zrdback prune still works).
+            retentionDays = parseNonNegative(KEY_RETENTION_DAYS,
+                    props.getProperty(KEY_RETENTION_DAYS), 0);
+            retentionSnapshots = parseNonNegative(KEY_RETENTION_SNAPSHOTS,
+                    props.getProperty(KEY_RETENTION_SNAPSHOTS), 0);
+            threads = parseNonNegative(KEY_THREADS, props.getProperty(KEY_THREADS), 0);
+            backupOnStop = parseBoolean(KEY_BACKUP_ON_STOP,
+                    props.getProperty(KEY_BACKUP_ON_STOP), true);
+            compressionLevel = parseCompressionLevel(KEY_COMPRESSION_LEVEL,
+                    props.getProperty(KEY_COMPRESSION_LEVEL), COMPRESSION_LEVEL_INCREMENTAL);
+            dimensions = parseDimensions(props.getProperty(KEY_DIMENSIONS));
+        }
+    }
+
+    /**
+     * Changes one setting and writes the config file.
+     *
+     * @param key one of {@link #KEYS}
+     * @param value the new value
+     * @return the canonical form of the value that was applied
+     * @throws IllegalArgumentException when the key is unknown or the value is
+     *     invalid; nothing is changed in that case
+     * @throws IOException when the config file cannot be written
+     */
+    public String set(String key, String value) throws IOException {
+        synchronized (lock) {
+            String canonical = canonicalize(key, value);
+            String previous = value(key);
+            apply(key, canonical);
+            try {
+                writeToDisk();
+            } catch (IOException e) {
+                apply(key, previous); // the file still holds the old value
+                throw e;
+            }
+            return canonical;
+        }
+    }
+
+    /**
+     * Restores one setting to its default value and writes the config file.
+     *
+     * @return the canonical form of the value that was applied
+     */
+    public String reset(String key) throws IOException {
+        synchronized (lock) {
+            String canonical = canonicalize(key, defaultValue(key));
+            String previous = value(key);
+            apply(key, canonical);
+            try {
+                writeToDisk();
+            } catch (IOException e) {
+                apply(key, previous); // the file still holds the old value
+                throw e;
+            }
+            return canonical;
+        }
+    }
+
+    /**
+     * Re-reads the config file, picking up edits made outside the game.
+     *
+     * @throws IOException when the file cannot be read
+     */
+    public void reload() throws IOException {
+        readFromDisk();
+    }
+
+    /** The current value of one setting, as it is written to the file. */
+    public String value(String key) {
+        synchronized (lock) {
+            return switch (key) {
+                case KEY_OUTPUT_DIRECTORY -> pendingOutputDirectory != null
+                        ? pendingOutputDirectory : outputDirectorySetting;
+                case KEY_INTERVAL_MINUTES -> Integer.toString(intervalMinutes);
+                case KEY_CHECKPOINT_INTERVAL -> Integer.toString(checkpointInterval);
+                case KEY_RETENTION_DAYS -> Integer.toString(retentionDays);
+                case KEY_RETENTION_SNAPSHOTS -> Integer.toString(retentionSnapshots);
+                case KEY_THREADS -> Integer.toString(threads);
+                case KEY_BACKUP_ON_STOP -> Boolean.toString(backupOnStop);
+                case KEY_COMPRESSION_LEVEL -> Integer.toString(compressionLevel);
+                case KEY_DIMENSIONS -> String.join(",", dimensions);
+                default -> throw new IllegalArgumentException("unknown setting: " + key);
+            };
+        }
+    }
+
+    /**
+     * A human-readable description of one setting's current value, with the
+     * "unset" values spelled out.
+     */
+    public String describe(String key) {
+        synchronized (lock) {
+            return switch (key) {
+                case KEY_OUTPUT_DIRECTORY -> {
+                    String configured = value(KEY_OUTPUT_DIRECTORY);
+                    if (configured.isEmpty()) {
+                        yield "(default) next to the world save";
+                    }
+                    yield configured;
+                }
+                case KEY_THREADS -> threads == 0
+                        ? "0 (auto)" : Integer.toString(threads);
+                case KEY_DIMENSIONS -> dimensions.isEmpty()
+                        ? "(all)" : String.join(",", dimensions);
+                default -> value(key);
+            };
+        }
+    }
+
+    /** The default value of one setting, as a file value. */
+    public static String defaultValue(String key) {        return switch (key) {
+            case KEY_OUTPUT_DIRECTORY -> "";
+            case KEY_INTERVAL_MINUTES -> "60";
+            case KEY_CHECKPOINT_INTERVAL -> "32";
+            case KEY_RETENTION_DAYS -> "0";
+            case KEY_RETENTION_SNAPSHOTS -> "0";
+            case KEY_THREADS -> "0";
+            case KEY_BACKUP_ON_STOP -> "true";
+            case KEY_COMPRESSION_LEVEL -> Integer.toString(COMPRESSION_LEVEL_INCREMENTAL);
+            case KEY_DIMENSIONS -> "";
+            default -> throw new IllegalArgumentException("unknown setting: " + key);
+        };
+    }
+
+    /**
+     * Validates a value and returns its canonical form, without applying it.
+     *
+     * @throws IllegalArgumentException when the key or the value is invalid
+     */
+    private String canonicalize(String key, String value) {
+        String raw = value == null ? "" : value.trim();
+        return switch (key) {
+            case KEY_OUTPUT_DIRECTORY -> raw;
+            case KEY_INTERVAL_MINUTES -> Integer.toString(parsePositive(key, raw, 60));
+            case KEY_CHECKPOINT_INTERVAL -> Integer.toString(parsePositive(key, raw, 32));
+            case KEY_RETENTION_DAYS -> Integer.toString(parseNonNegative(key, raw, 0));
+            case KEY_RETENTION_SNAPSHOTS -> Integer.toString(parseNonNegative(key, raw, 0));
+            case KEY_THREADS -> Integer.toString(parseNonNegative(key, raw, 0));
+            case KEY_BACKUP_ON_STOP -> Boolean.toString(parseBoolean(key, raw, true));
+            case KEY_COMPRESSION_LEVEL -> Integer.toString(parseCompressionLevel(key, raw,
+                    COMPRESSION_LEVEL_INCREMENTAL));
+            case KEY_DIMENSIONS -> String.join(",", parseDimensions(raw));
+            default -> throw new IllegalArgumentException("unknown setting: " + key
+                    + " (known: " + String.join(", ", KEYS) + ")");
+        };
+    }
+
+    /** Applies an already validated, canonical value. */
+    private void apply(String key, String canonical) {
+        switch (key) {
+            case KEY_OUTPUT_DIRECTORY ->
+                    // Not applied to the live store: the store root stays where
+                    // it is until the next restart.
+                    pendingOutputDirectory = canonical;
+            case KEY_INTERVAL_MINUTES -> intervalMinutes = Integer.parseInt(canonical);
+            case KEY_CHECKPOINT_INTERVAL -> checkpointInterval = Integer.parseInt(canonical);
+            case KEY_RETENTION_DAYS -> retentionDays = Integer.parseInt(canonical);
+            case KEY_RETENTION_SNAPSHOTS -> retentionSnapshots = Integer.parseInt(canonical);
+            case KEY_THREADS -> threads = Integer.parseInt(canonical);
+            case KEY_BACKUP_ON_STOP -> backupOnStop = Boolean.parseBoolean(canonical);
+            case KEY_COMPRESSION_LEVEL -> compressionLevel = Integer.parseInt(canonical);
+            case KEY_DIMENSIONS -> dimensions = parseDimensions(canonical);
+            default -> throw new IllegalArgumentException("unknown setting: " + key);
+        }
+    }
+
+    /** Writes the current settings to the config file. */
+    private void writeToDisk() throws IOException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# ZRDBack configuration.\n");
+        sb.append("# Edit by hand or with /zrdback config set; both write this file.\n");
+        sb.append("# A value of 0 disables the corresponding limit.\n");
+        for (String key : KEYS) {
+            sb.append(key).append('=').append(value(key)).append('\n');
+        }
+        ZvcrFiles.atomicWrite(configFile, sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private Path normalizedWorldRoot() {
         // getWorldPath(LevelResource.ROOT) ends in "/." (ROOT = ".") and may be
         // relative; normalize so the backups land NEXT TO the world save, never
         // inside it.
-        Path normalizedWorldRoot = worldRoot.toAbsolutePath().normalize();
-        Path base = output.isEmpty()
-                ? normalizedWorldRoot.getParent().resolve("zrdback-backups")
+        return worldRoot.toAbsolutePath().normalize();
+    }
+
+    private Path baseDirectory(String output) {
+        return output.isEmpty()
+                ? normalizedWorldRoot().getParent().resolve("zrdback-backups")
                 : Path.of(output).toAbsolutePath().normalize();
-        Path outputDirectory = resolveStoreRoot(base, normalizedWorldRoot, dedicatedServer);
-        if (!outputDirectory.equals(base) && Files.exists(base.resolve("files-index.json"))) {
+    }
+
+    private void warnAboutLegacyStore() {
+        Path base = baseDirectory(outputDirectorySetting);
+        if (!storeRoot.equals(base) && Files.exists(base.resolve(StoreLayout.INDEX_FILE))) {
             ZrdBack.LOGGER.warn(
                     "Found a legacy shared backup store at {} that mixed every singleplayer "
                     + "save's backups into one directory; it is no longer used. Each save now "
                     + "backs up into its own subdirectory ({}). Move or delete the old store "
-                    + "manually.", base, outputDirectory);
+                    + "manually.", base, storeRoot);
         }
-        int interval = parsePositive(props, "interval-minutes", 60);
-        int checkpoint = parsePositive(props, "checkpoint-interval", 32);
-        // 0 disables automatic pruning (manual /backup prune <days> still works).
-        int retention = Math.max(0,
-                Integer.parseInt(props.getProperty("retention-days", "0").trim()));
-        int threads = Integer.parseInt(props.getProperty("threads", "0").trim());
-        if (threads < 0) {
-            throw new IllegalStateException("threads must be >= 0: " + threads);
-        }
-        boolean backupOnStop = parseBoolean(props, "backup-on-stop", true);
-        int compression = parseCompressionLevel(props, "compression-level",
-                COMPRESSION_LEVEL_INCREMENTAL);
-        java.util.Set<String> dimensions = parseDimensions(props, "dimensions");
-        return new BackupConfig(outputDirectory, interval, checkpoint, retention, threads,
-                backupOnStop, compression, dimensions);
     }
 
     /**
@@ -150,59 +406,81 @@ public final class BackupConfig {
         return base.resolve(normalizedWorldRoot.getFileName().toString());
     }
 
-    private static int parsePositive(Properties props, String key, int fallback) {
-        String raw = props.getProperty(key, "").trim();
-        if (raw.isEmpty()) return fallback;
-        int value = Integer.parseInt(raw);
-        if (value <= 0) throw new IllegalStateException(key + " must be positive: " + value);
-        return value;
+    private static int parsePositive(String key, String raw, int fallback) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) return fallback;
+        int parsed = parseInt(key, value);
+        if (parsed <= 0) {
+            throw new IllegalArgumentException(key + " must be a positive number: " + parsed);
+        }
+        return parsed;
     }
 
-    private static boolean parseBoolean(Properties props, String key, boolean fallback) {
-        String raw = props.getProperty(key, "").trim();
-        if (raw.isEmpty()) return fallback;
-        if (raw.equalsIgnoreCase("true") || raw.equals("1") || raw.equalsIgnoreCase("yes")) {
+    private static int parseNonNegative(String key, String raw, int fallback) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) return fallback;
+        int parsed = parseInt(key, value);
+        if (parsed < 0) {
+            throw new IllegalArgumentException(key + " must not be negative: " + parsed);
+        }
+        return parsed;
+    }
+
+    private static int parseInt(String key, String value) {
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(key + " must be a number, got '" + value + "'");
+        }
+    }
+
+    private static boolean parseBoolean(String key, String raw, boolean fallback) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) return fallback;
+        if (value.equalsIgnoreCase("true") || value.equals("1") || value.equalsIgnoreCase("yes")) {
             return true;
         }
-        if (raw.equalsIgnoreCase("false") || raw.equals("0") || raw.equalsIgnoreCase("no")) {
+        if (value.equalsIgnoreCase("false") || value.equals("0") || value.equalsIgnoreCase("no")) {
             return false;
         }
-        throw new IllegalStateException(key + " must be true or false: " + raw);
+        throw new IllegalArgumentException(key + " must be true or false, got '" + value + "'");
     }
 
-    private static int parseCompressionLevel(Properties props, String key, int fallback) {
-        String raw = props.getProperty(key, "").trim();
-        if (raw.isEmpty()) return fallback;
-        int value = Integer.parseInt(raw);
-        if (value < 1 || value > 19) {
-            throw new IllegalStateException(key + " must be between 1 and 19: " + value);
+    private static int parseCompressionLevel(String key, String raw, int fallback) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) return fallback;
+        int parsed = parseInt(key, value);
+        if (parsed < 1 || parsed > 19) {
+            throw new IllegalArgumentException(key + " must be between 1 and 19: " + parsed);
         }
-        return value;
+        return parsed;
     }
 
-    private static java.util.Set<String> parseDimensions(Properties props, String key) {
-        String raw = props.getProperty(key, "").trim();
-        if (raw.isEmpty()) {
-            return java.util.Set.of();
+    private static Set<String> parseDimensions(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) {
+            return Set.of();
         }
-        java.util.Set<String> dimensions = new java.util.LinkedHashSet<>();
-        for (String part : raw.split(",")) {
-            String name = part.trim().toLowerCase(java.util.Locale.ROOT);
+        Set<String> parsed = new LinkedHashSet<>();
+        for (String part : value.split(",")) {
+            String name = part.trim().toLowerCase(Locale.ROOT);
             if (name.isEmpty()) {
                 continue;
             }
             switch (name) {
-                case "overworld", "nether", "end" -> dimensions.add(name);
-                default -> throw new IllegalStateException(
-                        key + " contains an unknown dimension '" + name
+                case "overworld", "nether", "end" -> parsed.add(name);
+                default -> throw new IllegalArgumentException(
+                        KEY_DIMENSIONS + " contains an unknown dimension '" + name
                         + "' (expected overworld, nether or end)");
             }
         }
-        return java.util.Set.copyOf(dimensions);
+        // Keep the configured order: the file is rewritten from this value, and
+        // Set.copyOf would shuffle it on every write.
+        return java.util.Collections.unmodifiableSet(parsed);
     }
 
     public Path outputDirectory() {
-        return outputDirectory;
+        return storeRoot;
     }
 
     public int intervalMinutes() {
@@ -216,6 +494,16 @@ public final class BackupConfig {
     /** 0 = keep history forever (manual prune only). */
     public int retentionDays() {
         return retentionDays;
+    }
+
+    /** 0 = the number of restore points does not constrain retention. */
+    public int retentionSnapshots() {
+        return retentionSnapshots;
+    }
+
+    /** The configured retention as a policy. */
+    public RetentionPolicy retentionPolicy() {
+        return new RetentionPolicy(retentionDays, retentionSnapshots);
     }
 
     /** Worker threads for backup/prune; 0 = auto (all cores). */

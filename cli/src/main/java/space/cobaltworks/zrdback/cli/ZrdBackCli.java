@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.TreeSet;
 
 import space.cobaltworks.zrdback.store.FileBlobStore;
+import space.cobaltworks.zrdback.store.RetentionPolicy;
+import space.cobaltworks.zrdback.store.StoreInspector;
 import space.cobaltworks.zrdback.store.StoreLayout;
 import space.cobaltworks.zrdback.store.StorePruner;
 import space.cobaltworks.zrdback.store.StoreVerifier;
@@ -40,7 +42,8 @@ import space.cobaltworks.zrdback.store.TimestampSidecar;
  *   zrdback-cli list    [--store DIR] [--days N]
  *   zrdback-cli stats   [--store DIR]
  *   zrdback-cli verify  [--store DIR]
- *   zrdback-cli prune   --store DIR --days N [--dry-run]
+ *   zrdback-cli diff    --store DIR --older TS --newer TS
+ *   zrdback-cli prune   --store DIR --days N [--keep N] [--dry-run]
  * </pre>
  *
  * <p>The store directory defaults to {@code ./zrdback-backups}.
@@ -87,7 +90,7 @@ public final class ZrdBackCli {
                 usage(System.out);
                 return 0;
             }
-            case "list", "stats", "verify", "prune" -> {
+            case "list", "stats", "verify", "diff", "prune" -> {
                 // handled below
             }
             default -> {
@@ -99,8 +102,13 @@ public final class ZrdBackCli {
 
         // Validate the command's own options before touching the store, so
         // a usage error does not depend on a store being present.
-        if (command.equals("prune") && option(rest, "--days").isEmpty()) {
-            throw new IllegalArgumentException("prune requires --days N");
+        if (command.equals("prune") && option(rest, "--days").isEmpty()
+                && option(rest, "--keep").isEmpty()) {
+            throw new IllegalArgumentException("prune requires --days N and/or --keep N");
+        }
+        if (command.equals("diff")
+                && (option(rest, "--older").isEmpty() || option(rest, "--newer").isEmpty())) {
+            throw new IllegalArgumentException("diff requires --older TS and --newer TS");
         }
 
         Path store = option(rest, "--store").map(Path::of).orElse(Path.of(DEFAULT_STORE));
@@ -120,6 +128,9 @@ public final class ZrdBackCli {
             }
             case "verify" -> {
                 return verify(store);
+            }
+            case "diff" -> {
+                return diff(store, rest);
             }
             default -> {
                 return prune(store, rest);
@@ -154,17 +165,34 @@ public final class ZrdBackCli {
     }
 
     private static void stats(Path store) throws IOException {
-        FileBlobStore blobs = FileBlobStore.open(store);
+        StoreInspector.Stats s = StoreInspector.stats(store);
         System.out.println("store:      " + store.toAbsolutePath());
-        System.out.println("blobs:      " + blobs.blobCount() + " (" + blobs.blobBytes() / 1024 + " KiB)");
-        System.out.println("tracked:    " + blobs.trackedFileCount() + " files");
+        System.out.println("files:      " + s.files() + " (" + s.fileBytes() / 1024 + " KiB)");
+        System.out.println("segments:   " + s.segments());
+        System.out.println("chains:     " + s.chains() + " (entries " + s.chainEntries()
+                + ", avg " + String.format("%.1f", s.avgChain())
+                + ", min " + s.minChain() + ", max " + s.maxChain() + ")");
+        System.out.println("te-deltas:  " + s.teDeltas());
+        System.out.println("palettes:   " + s.distinctPalettes() + " distinct / " + s.paletteRefs()
+                + " refs (" + String.format("%.1f", 100.0 * (1.0 - s.paletteDedupRatio()))
+                + "% dedup)");
+        System.out.println("blobs:      " + s.blobCount() + " (" + s.blobBytes() / 1024 + " KiB)");
+        System.out.println("tracked:    " + s.trackedFiles() + " files");
+    }
 
-        List<Path> files = StoreLayout.regionFiles(store);
-        long bytes = 0;
-        for (Path file : files) {
-            bytes += Files.size(file);
-        }
-        System.out.println("regions:    " + files.size() + " (" + bytes / 1024 + " KiB)");
+    /** Compares two restore points. */
+    private static int diff(Path store, List<String> args) throws IOException {
+        long older = parseNumber("--older", requireOption(args, "--older"));
+        long newer = parseNumber("--newer", requireOption(args, "--newer"));
+        StoreInspector.Diff d = StoreInspector.diff(store, older, newer);
+        System.out.println("store:      " + store.toAbsolutePath());
+        System.out.println("diff:       " + older + " -> " + newer);
+        System.out.println("chunks:     " + d.chunksChanged() + " changed, "
+                + d.chunksOnlyInNew() + " only in the newer point, "
+                + d.chunksOnlyInOld() + " only in the older point");
+        System.out.println("files:      " + d.filesChanged() + " changed");
+        System.out.println("duration:   " + d.durationMs() + " ms");
+        return 0;
     }
 
     private static int verify(Path store) throws IOException {
@@ -183,24 +211,44 @@ public final class ZrdBackCli {
     }
 
     private static int prune(Path store, List<String> args) throws IOException {
-        String daysOption = option(args, "--days").orElse(null);
-        if (daysOption == null) {
-            throw new IllegalArgumentException("prune requires --days N");
+        int days = 0;
+        int keep = 0;
+        if (option(args, "--days").isPresent()) {
+            days = parseNumber("--days", option(args, "--days").get());
         }
-        int days;
-        try {
-            days = Integer.parseInt(daysOption);
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("--days must be a number, got '" + daysOption + "'");
+        if (option(args, "--keep").isPresent()) {
+            keep = parseNumber("--keep", option(args, "--keep").get());
+        }
+        RetentionPolicy policy = new RetentionPolicy(days, keep);
+        if (policy.isUnbounded()) {
+            System.err.println("error: nothing to prune: give --days N and/or --keep N "
+                    + "(a value below 1 disables that limit)");
+            usage(System.err);
+            return 2;
         }
         boolean dryRun = args.contains("--dry-run");
-        long cutoff = System.currentTimeMillis() / 1000 - days * 86400L;
 
-        System.out.println("pruning entries older than " + days + " day(s)"
+        System.out.println("pruning entries older than " + policy.describe()
                 + (dryRun ? " (dry run)" : ""));
-        int removed = StorePruner.prune(store, cutoff, dryRun);
+        int removed = StorePruner.prune(store, policy, dryRun);
         System.out.println("removed " + removed + " chain/blob entr(ies)");
         return 0;
+    }
+
+    /** Parses a numeric option; negative values are allowed and mean "no limit". */
+    private static int parseNumber(String name, String raw) {
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(name + " must be a number, got '" + raw + "'");
+        }
+    }
+
+    /** Reads an option that the caller already checked is present. */
+    private static String requireOption(List<String> args, String name) {
+        return option(args, name)
+                .orElseThrow(() -> new IllegalArgumentException(name + " is required"))
+                .trim();
     }
 
     private static java.util.Optional<String> option(List<String> args, String name) {
@@ -219,8 +267,14 @@ public final class ZrdBackCli {
         out.println("  list    [--store DIR] [--days N]   list restore points");
         out.println("  stats   [--store DIR]             store statistics");
         out.println("  verify  [--store DIR]             check the store for corruption");
-        out.println("  prune   --store DIR --days N [--dry-run]");
-        out.println("                                    drop history older than N days");
+        out.println("  diff    --store DIR --older TS --newer TS");
+        out.println("                                    compare two restore points");
+        out.println("  prune   --store DIR [--days N] [--keep N] [--dry-run]");
+        out.println("                                    drop history older than N days and/or");
+        out.println("                                    keep the history of the last N backups");
+        out.println();
+        out.println("A limit below 1 is ignored, so 'prune --days 0 --keep 5' keeps the");
+        out.println("history of the last five backups regardless of their age.");
         out.println();
         out.println("The store directory defaults to ./" + DEFAULT_STORE);
     }

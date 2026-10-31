@@ -107,6 +107,7 @@ class ZrdBackCliTest {
         Result result = run("stats", "--store", tmp.toString());
         assertEquals(0, result.exitCode());
         assertEquals(true, result.out().contains("blobs:"));
+        assertEquals(true, result.out().contains("chains:"));
     }
 
     @Test
@@ -122,5 +123,46 @@ class ZrdBackCliTest {
         Result result = run("prune", "--store", "/tmp");
         assertEquals(2, result.exitCode());
         assertEquals(true, result.err().contains("prune requires --days"));
+    }
+
+    @Test
+    void pruneAcceptsTheSnapshotLimitOnItsOwn(@TempDir Path tmp) throws Exception {
+        Files.createDirectories(tmp);
+        Result result = run("prune", "--store", tmp.toString(), "--keep", "5");
+        assertEquals(0, result.exitCode());
+        assertEquals(true, result.out().contains("keep the history of the last 5 snapshot"));
+    }
+
+    @Test
+    void aLimitBelowOneDisablesIt(@TempDir Path tmp) throws Exception {
+        Files.createDirectories(tmp);
+        Result result = run("prune", "--store", tmp.toString(), "--days", "0", "--keep", "3");
+        assertEquals(0, result.exitCode());
+        assertEquals(true, result.out().contains("no age limit"));
+        assertEquals(true, result.out().contains("keep the history of the last 3 snapshot"));
+    }
+
+    @Test
+    void pruningWithoutAnyLimitIsAUsageError(@TempDir Path tmp) throws Exception {
+        Files.createDirectories(tmp);
+        Result result = run("prune", "--store", tmp.toString(), "--days", "0", "--keep", "0");
+        assertEquals(2, result.exitCode());
+        assertEquals(true, result.err().contains("nothing to prune"));
+    }
+
+    @Test
+    void diffRequiresBothTimestamps(@TempDir Path tmp) throws Exception {
+        Files.createDirectories(tmp);
+        Result result = run("diff", "--store", tmp.toString(), "--older", "1000");
+        assertEquals(2, result.exitCode());
+        assertEquals(true, result.err().contains("diff requires --older"));
+    }
+
+    @Test
+    void comparesTwoRestorePointsOfAnEmptyStore(@TempDir Path tmp) throws Exception {
+        Files.createDirectories(tmp);
+        Result result = run("diff", "--store", tmp.toString(), "--older", "1000", "--newer", "2000");
+        assertEquals(0, result.exitCode());
+        assertEquals(true, result.out().contains("0 changed"));
     }
 }

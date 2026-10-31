@@ -23,8 +23,8 @@ dependencies {
 test {
     useJUnitPlatform()
     testLogging {
-        events 'failed', 'skipped'
-        exceptionFormat 'full'
+        events = ['failed', 'skipped']
+        exceptionFormat = 'full'
     }
 }
 
@@ -52,7 +52,12 @@ jar {
         attributes(
             'Main-Class': application.mainClass.get(),
             'Implementation-Title': 'zrdback-cli',
-            'Implementation-Version': project.version
+            'Implementation-Version': project.version,
+            // zstd-jni loads its native library from an unnamed module. JDK 24+
+            // warns about that and will block it in a future release unless
+            // native access is enabled; the manifest attribute does that for
+            // every `java -jar` run without a command-line flag.
+            'Enable-Native-Access': 'ALL-UNNAMED'
         )
     }
 

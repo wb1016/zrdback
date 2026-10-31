@@ -18,7 +18,7 @@
  * The ZVCR-3D format and the reference implementation (zvcr, zvcr_utils)
  * by crayne are licensed under the GNU Lesser General Public License v3.
  */
-package space.cobaltworks.zrdback.backup;
+package space.cobaltworks.zrdback.store;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -53,18 +53,18 @@ class ChunkStateTest {
     void aChunkCreatedLaterHasNoStateEarlier() {
         Segment segment = segmentWith(new int[] {1, 2}, 2000);
 
-        assertNull(BackupService.chunkState(segment, 1000),
+        assertNull(StoreInspector.chunkState(segment, 1000),
                 "a chunk first recorded at 2000 had no state at 1000");
-        assertNotNull(BackupService.chunkState(segment, 2000));
-        assertNotNull(BackupService.chunkState(segment, 3000),
+        assertNotNull(StoreInspector.chunkState(segment, 2000));
+        assertNotNull(StoreInspector.chunkState(segment, 3000),
                 "a chunk keeps its last known state after its last backup");
     }
 
     @Test
     void anUnchangedChunkComparesEqual() {
         Segment segment = segmentWith(new int[] {1, 2}, 1000);
-        assertEquals(BackupService.chunkState(segment, 1000),
-                BackupService.chunkState(segment, 5000));
+        assertEquals(StoreInspector.chunkState(segment, 1000),
+                StoreInspector.chunkState(segment, 5000));
     }
 
     @Test
@@ -75,14 +75,14 @@ class ChunkStateTest {
         segment.blockSections.section(0).insertSnapshot(
                 new PackedSnapshot(PackedData.pack(new int[] {1, 3}, true), 2000));
 
-        assertEquals(false, BackupService.chunkState(segment, 1000)
-                .equals(BackupService.chunkState(segment, 2000)),
+        assertEquals(false, StoreInspector.chunkState(segment, 1000)
+                .equals(StoreInspector.chunkState(segment, 2000)),
                 "a chunk whose content changed must not compare equal");
     }
 
     @Test
     void anEmptySegmentHasNoState() {
-        assertNull(BackupService.chunkState(new Segment(Dimension.OVERWORLD), 1000));
+        assertNull(StoreInspector.chunkState(new Segment(Dimension.OVERWORLD), 1000));
     }
 
     @Test
@@ -93,7 +93,7 @@ class ChunkStateTest {
         segment.blockSections.section(1).insertSnapshot(
                 new PackedSnapshot(PackedData.pack(new int[] {2}, true), 1000));
 
-        var state = BackupService.chunkState(segment, 1000);
+        var state = StoreInspector.chunkState(segment, 1000);
         assertNotNull(state);
         assertEquals(2, state.blocks().length / 4096, "both sections must be present");
         assertEquals(1, state.blocks()[0]);
@@ -108,7 +108,7 @@ class ChunkStateTest {
                         new space.cobaltworks.zvcr.region.TileEntityPosition(0, 0, 0),
                         new byte[] {1})));
 
-        var state = BackupService.chunkState(segment, 1000);
+        var state = StoreInspector.chunkState(segment, 1000);
         assertNotNull(state);
         assertEquals(1, state.tileEntities());
     }

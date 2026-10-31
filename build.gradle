@@ -7,4 +7,11 @@ subprojects {
         it.options.release = project.java_version as Integer
         options.encoding = 'UTF-8'
     }
+
+    // zstd-jni loads its native library through System.loadLibrary from an
+    // unnamed module. JDK 24+ warns about that and will block it in a future
+    // release unless native access is enabled explicitly.
+    tasks.withType(Test).configureEach {
+        jvmArgs '--enable-native-access=ALL-UNNAMED'
+    }
 }
